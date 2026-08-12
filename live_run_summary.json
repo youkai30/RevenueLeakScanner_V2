@@ -1,0 +1,62 @@
+{
+  "total_stores": 3,
+  "results": [
+    {
+      "domain": "kith.com",
+      "status": "SUCCESS",
+      "session_id": "f8640ca4-4846-4a8f-869a-3045da1607ab",
+      "build_id": "ad3a498e-5f2f-484e-a4be-72048c57528d",
+      "duration_ms": 47488,
+      "error_type": null,
+      "error_message": null,
+      "session_json_path": "C:\\Users\\Admin\\Documents\\Default Project\\RevenueLeakScanner_V2\\storage\\sessions\\kith.com\\f8640ca4-4846-4a8f-869a-3045da1607ab\\session_f8640ca4-4846-4a8f-869a-3045da1607ab.json",
+      "pdf_report_path": "C:\\Users\\Admin\\Documents\\Default Project\\RevenueLeakScanner_V2\\storage\\reports\\kith.com\\f8640ca4-4846-4a8f-869a-3045da1607ab\\audit.pdf",
+      "teaser_image_path": "C:\\Users\\Admin\\Documents\\Default Project\\RevenueLeakScanner_V2\\storage\\reports\\kith.com\\f8640ca4-4846-4a8f-869a-3045da1607ab\\teaser.png",
+      "est_monthly_loss_usd": 0.0,
+      "lead_priority": "LOW",
+      "store_timeout": false,
+      "store_timeout_seconds": null,
+      "store_elapsed_seconds": null,
+      "timeout_reason": null,
+      "timeout_phase": null
+    },
+    {
+      "domain": "alohas.io",
+      "status": "SUCCESS",
+      "session_id": "2a4b6c67-f40c-4e24-92d3-1238fb6900a2",
+      "build_id": "d0fdd417-6089-46d6-a632-4ca58d14c245",
+      "duration_ms": 44104,
+      "error_type": null,
+      "error_message": null,
+      "session_json_path": "C:\\Users\\Admin\\Documents\\Default Project\\RevenueLeakScanner_V2\\storage\\sessions\\alohas.io\\2a4b6c67-f40c-4e24-92d3-1238fb6900a2\\session_2a4b6c67-f40c-4e24-92d3-1238fb6900a2.json",
+      "pdf_report_path": "C:\\Users\\Admin\\Documents\\Default Project\\RevenueLeakScanner_V2\\storage\\reports\\alohas.io\\2a4b6c67-f40c-4e24-92d3-1238fb6900a2\\audit.pdf",
+      "teaser_image_path": "C:\\Users\\Admin\\Documents\\Default Project\\RevenueLeakScanner_V2\\storage\\reports\\alohas.io\\2a4b6c67-f40c-4e24-92d3-1238fb6900a2\\teaser.png",
+      "est_monthly_loss_usd": 0.0,
+      "lead_priority": "LOW",
+      "store_timeout": false,
+      "store_timeout_seconds": null,
+      "store_elapsed_seconds": null,
+      "timeout_reason": null,
+      "timeout_phase": null
+    },
+    {
+      "domain": "triangl.com",
+      "status": "SUCCESS",
+      "session_id": "ffcd2b68-be24-48d8-8964-ef5c9fc829d1",
+      "build_id": "6ab52ac5-7834-4c18-a7c5-3af44be940be",
+      "duration_ms": 43553,
+      "error_type": null,
+      "error_message": null,
+      "session_json_path": "C:\\Users\\Admin\\Documents\\Default Project\\RevenueLeakScanner_V2\\storage\\sessions\\triangl.com\\ffcd2b68-be24-48d8-8964-ef5c9fc829d1\\session_ffcd2b68-be24-48d8-8964-ef5c9fc829d1.json",
+      "pdf_report_path": "C:\\Users\\Admin\\Documents\\Default Project\\RevenueLeakScanner_V2\\storage\\reports\\triangl.com\\ffcd2b68-be24-48d8-8964-ef5c9fc829d1\\audit.pdf",
+      "teaser_image_path": "C:\\Users\\Admin\\Documents\\Default Project\\RevenueLeakScanner_V2\\storage\\reports\\triangl.com\\ffcd2b68-be24-48d8-8964-ef5c9fc829d1\\teaser.png",
+      "est_monthly_loss_usd": 0.0,
+      "lead_priority": "LOW",
+      "store_timeout": false,
+      "store_timeout_seconds": null,
+      "store_elapsed_seconds": null,
+      "timeout_reason": null,
+      "timeout_phase": null
+    }
+  ]
+}

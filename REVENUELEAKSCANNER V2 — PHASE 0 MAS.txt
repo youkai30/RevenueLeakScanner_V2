@@ -1,0 +1,741 @@
+REVENUELEAKSCANNER V2 — PHASE 0 MASTER SPECIFICATION & CONTRACT BUNDLE
+Notice: This document consolidates all 9 Phase 0 specifications, system contracts, state models, invariants, failure policies, and target architecture boundaries into a single master reference.
+
+DOCUMENT 1: CURRENT SYSTEM BASELINE
+CURRENT SYSTEM BASELINE — REVENUELEAKSCANNER V2
+1. ACTUAL ARCHITECTURE MAP & DATA FLOW
+
+[Input Store List] 
+       │
+       ▼
+[src/ingestion/store_loader.py] -> StoreRecord (Pydantic DTO)
+       │
+       ▼
+[src/orchestration/worker.py] -> execute_single_store_worker()
+       │
+       ├─► BrowserFactory.start() -> Launch Chromium
+       ├─► BrowserFactory.create_clean_context() -> 1024x600 Viewport
+       │
+       ▼
+[src/scanner/core_scanner.py] -> IntegratedStoreScanner.scan_store()
+       │
+       ├─► [src/scanner/product_discovery.py] -> ProductDiscoveryEngine.discover_pdp_urls()
+       │        ├─ Try GET /products.json?limit=10
+       │        ├─ Fallback DOM href extraction (a[href])
+       │        └─ Fallback XML sitemap (/sitemap_products_1.xml, /sitemap.xml)
+       │
+       └─► Loop candidate PDP URLs (Max 3):
+                │
+                ├─► page.goto(url) [No Page Type Validation]
+                │
+                ├─► [src/scanner/variant_matrix.py] -> VariantMatrixScanner
+                │        ├─ inspect_variants() -> list[VariantInfo]
+                │        └─ discover_and_select_oos_variant() -> (name, oos_bool)
+                │
+                ├─► [src/scanner/bis_checker.py] -> BISChecker
+                │        └─ check_notify_mechanism() -> (notify_detected, sold_out_detected)
+                │
+                ├─► [src/scanner/cro_stack_detector.py] -> CROStackDetector
+                │        ├─ detect_review_widget() -> (review_detected, platform, count)
+                │        └─ detect_cro_modules() -> (upsell_detected, sticky_atc_detected)
+                │             └─ Mobile Fallback: If not sticky & scrollHeight >= 1200:
+                │                   m_context = BrowserFactory.create_mobile_context() (375x667)
+                │                   CROStackDetector(m_page).detect_cro_modules()
+                │
+                └─► Opportunity Logic Evaluation (In-Memory inside core_scanner.py)
+                        ├─ Engine 1: out_of_stock and not notify_detected -> REVENUE_LEAK
+                        ├─ Engine 2: not review_widget_detected and count==0 -> MISSING_SOCIAL_PROOF
+                        ├─ Engine 3: not upsell_detected and product_title -> MISSING_UPSELL
+                        └─ Engine 4: not mobile_sticky_detected and height>=1200 -> MISSING_STICKY_ATC
+                                 │
+                                 ▼
+                     TransientScanContext (In-Memory DTO)
+                                 │
+       ┌─────────────────────────┴─────────────────────────┐
+       ▼                                                   ▼
+[src/commercial/impact_calculator.py]          [src/evidence/evidence_collector.py]
+CommercialImpactCalculator                      EvidenceCollector (Runs ONCE after scan loop)
+       │                                                   │
+       ▼                                                   ▼
+CommercialImpact DTO                           png_bytes (1 Screenshot for session)
+       │                                       bounding_boxes
+       └─────────────────────────┬─────────────────────────┘
+                                 ▼
+               [src/evidence/session_serializer.py]
+               EvidenceBuilder.compile_and_save_session()
+                                 │
+                                 ▼
+               [src/evidence/session_storage.py]
+               SessionStorage.save_new_bundle() -> Disk (Atomic Write-Once)
+                                 │
+                                 ▼
+               SessionBundle Artifact JSON & PNG
+                                 │
+       ┌─────────────────────────┴─────────────────────────┐
+       ▼                                                   ▼
+[src/presentation/payload_compiler.py]          [src/commercial/lead_exporter.py]
+PayloadCompiler                                CommercialLeadExporter.assemble_lead()
+       │                                                   │
+       ▼                                                   ├─► Calls PostScanEnricher
+[src/presentation/drivers/]                                │
+PDFDriver & TeaserDriver                                   ▼
+       │                                       CommercialLeadRecord
+       ▼                                                   │
+audit.pdf & teaser.png                                     ▼
+                                               leads.json & leads.csv
+2. ACTUAL FUNCTION CALL TRACE
+StoreLoader.load_stores_from_file(file_path) -> Validates and returns list[StoreRecord].
+worker.execute_single_store_worker(store_dict) -> Spawns Playwright via BrowserFactory.
+IntegratedStoreScanner.scan_store(page, store_record):
+Calls ProductDiscoveryEngine.discover_pdp_urls(page, store_record.base_url).
+Iterates up to max_candidates=3 discovered URLs:
+page.goto(url, wait_until="domcontentloaded", timeout=15000)
+product_title = (page.title() or domain).split("|")[0].strip()
+VariantMatrixScanner(page).inspect_variants()
+VariantMatrixScanner(page).discover_and_select_oos_variant()
+BISChecker(page).check_notify_mechanism()
+CROStackDetector(page).detect_review_widget()
+CROStackDetector(page).detect_cro_modules()
+Mobile context check if sticky ATC absent & scrollHeight >= 1200.
+Appends PDPScanResult with evaluated CommercialOpportunity objects into TransientScanContext.
+CommercialImpactCalculator.build_commercial_impact_dto(scan_context, traffic):
+Computes oos_ratio = total_oos / total_inspected.
+Computes est_monthly_loss_usd = traffic * oos_ratio * baseline_cr * aov.
+Applies mandatory -0.30 confidence penalty for fallback traffic and -0.05 for fallback AOV.
+EvidenceCollector(page).capture_screenshot_bytes():
+Executes page.screenshot() ONCE on whatever page is currently loaded after the scan loop finishes.
+EvidenceBuilder.compile_and_save_session():
+Wraps findings and png_bytes into Finding objects.
+Seals SessionBundle with SHA-256 checksum and saves to storage/sessions/{domain}/{session_id}/.
+PayloadCompiler + PDFDriver + TeaserDriver:
+Generates audit.pdf and teaser.png.
+CommercialLeadExporter.assemble_lead(bundle):
+Sorts opportunities by priority: REVENUE_LEAK (1) > MISSING_STICKY_ATC (2) > MISSING_SOCIAL_PROOF (3) > MISSING_UPSELL (4).
+Executes PostScanEnricher.enrich_bundle(bundle) for metadata (brand name, contact page).
+Evaluates lead_class: Class A if REVENUE_LEAK or (opps >= 1 and coverage == FULL).
+CommercialLeadExporter.export_leads():
+Serializes CommercialLeadRecord items to leads.json and leads.csv.
+3. CURRENT DATA CONTRACTS & PRODUCER/CONSUMER MAP
+DTO / Object	Field	Producer	Consumer	Current Meaning / State	Reliability	Fallback / UNKNOWN
+StoreRecord	domain, base_url	store_loader.py	core_scanner.py	Target store hostname and root URL	High	Validated via regex
+PDPScanResult	product_name	core_scanner.py	session_serializer.py	Page <title> split by |	Medium	Defaults to domain name if title empty
+out_of_stock	variant_matrix.py	core_scanner.py	True if any matching selector has disabled or OOS class	Low-Medium	No UNKNOWN state. False if no matching selector
+notify_button_detected	bis_checker.py	core_scanner.py	True if BIS button/text pattern found	Medium	False if not found. No UNKNOWN state
+review_widget_detected	cro_stack_detector.py	core_scanner.py	True if any of 6 hardcoded platform selectors found	Low	False if platform is not in the 6 hardcoded signatures. No UNKNOWN state
+upsell_detected	cro_stack_detector.py	core_scanner.py	True if any of 8 upsell selectors found	Low	False if not found. Self-marked PARTIALLY_VERIFIED
+sticky_atc_detected	cro_stack_detector.py	core_scanner.py	True if 3 desktop or mobile sticky selectors found	Medium	False if not found. No UNKNOWN state
+CommercialOpportunity	opportunity_type	core_scanner.py	lead_exporter.py	REVENUE_LEAK, MISSING_STICKY_ATC, MISSING_SOCIAL_PROOF, MISSING_UPSELL	Mixed	Derived purely from absence of positive presence signal
+VisualEvidence	image_file, sha256_hash	evidence_collector.py	session_serializer.py	Screenshot PNG hash and filename	High (Stream)	Validates PNG bytes only, NOT page relevance
+relative_path	session_serializer.py	lead_exporter.py	f"{product_url}/{png_filename}"	Unreliable	Pseudo-URL string that does NOT map to a real file path
+CommercialImpact	est_monthly_loss_usd	impact_calculator.py	lead_exporter.py	Traffic * OOS_Ratio * 0.02 * $65	Low	Uses 100% hardcoded fallbacks (50k traffic, $65 AOV, 2% CR)
+confidence_score	impact_calculator.py	lead_exporter.py	1.0 - 0.30 (traffic) - 0.05 (AOV) = 0.65	Constant	Always 0.65 for all 39 leads
+CommercialLeadRecord	company_name	post_scan_enricher.py	lead_exporter.py	First segment of PDP <title>	Unreliable	Contains Product Title fragment, NOT company name
+contact_page	post_scan_enricher.py	lead_exporter.py	urljoin(base_url, "/pages/contact")	Low	Hardcoded Shopify convention URL, NOT DOM scraped
+contact_page_source	post_scan_enricher.py	lead_exporter.py	"DOM_LINK"	Unreliable	Hardcoded label even though URL was pattern-inferred
+enrichment_status	post_scan_enricher.py	lead_exporter.py	"SUCCESS"	Unreliable	Reports SUCCESS even when all emails, phones, and social URLs are null
+4. CURRENT STATE MODEL AUDIT
+
+[Target URL] ──► [Navigation] ──► [DOM Inspection] ──► [Binary Decision]
+                                                              │
+                                            ┌─────────────────┴─────────────────┐
+                                            ▼                                   ▼
+                                      TRUE (Detected)                    FALSE (Not Detected)
+                                            │                                   │
+                                            ▼                                   ▼
+                                    No Opportunity                   OPPORTUNITY GENERATED
+                                                                     (Conflates Absence/Failure
+                                                                      with Opportunity)
+CRITICAL FINDING: UNKNOWN STATE DOES NOT EXIST IN ANY ENGINE.
+
+Product Discovery: Candidate URLs matching /products/ or containing digits are unconditionally accepted. Cloudflare walls, category pages, and editorial pages are processed as valid PDPs.
+Variant Matrix: Returns (variant_name, True) if any selector element is disabled. Returns ("Default Variant", False) otherwise. No state for ambiguous/pre-selection elements.
+BIS Checker: Returns (notify_detected, sold_out_detected). Returns False if selectors/text are absent. No distinction between "no BIS form" and "BIS form lazy-loaded/uninspectable".
+CRO Stack Detector:
+Reviews: Returns review_widget_detected = False if platform is not Yotpo, Okendo, Loox, Judge.me, Stamped.io, or Shopify PR.
+Upsell: Returns upsell_detected = False if 8 selectors fail.
+Sticky ATC: Returns sticky_atc_detected = False if 3 selectors fail on desktop and mobile.
+5. CURRENT EVIDENCE MODEL AUDIT
+Screenshot Capture Timing: Captured ONCE per store scan after all candidate PDPs (up to 3) have been navigated and evaluated (worker.py line 83).
+Screenshot Representation: Represents the final page state of the last inspected URL in the scan loop.
+Scope Level: Session-level screenshot shared across all findings. It is NOT finding-level.
+Finding Linkage: The exact same png_bytes and bounding_boxes are assigned to every Finding in the SessionBundle. Finding 1 (PDP 1) receives the screenshot of PDP 3.
+Storage: Saved on disk at storage/sessions/{domain}/{session_id}/session_{session_id}.png.
+Verification: VisualVerifier asserts PNG stream integrity, dimensions (>=1024x600), and canvas non-blankness. It does not verify whether the screenshot matches the product URL or title of the finding.
+Path Validity: VisualEvidence.relative_path stores https://{domain}/products/{slug}/session_{id}.png. This is a pseudo-URL and does not point to a disk file.
+Claim Proovability: Current evidence cannot prove individual finding claims because screenshot evidence is decoupled from the PDP page state that produced the finding.
+6. CURRENT COMMERCIAL MODEL AUDIT
+Finding Definition: A PDPScanResult containing one or more CommercialOpportunity DTOs.
+Opportunity Definition: A boolean evaluation inside core_scanner.py where the absence of a positive detection signal generates a sellable service angle.
+Lead Definition: A CommercialLeadRecord aggregated across all findings for a single domain (1 store = 1 lead).
+Confidence Computation: Hardwired constant 0.65 produced by subtracting fixed fallback penalties (1.0 - 0.30 - 0.05).
+Impact Computation: Est. Monthly Loss = 50,000 traffic * OOS_Ratio * 0.02 CR * $65 AOV.
+Classification Logic (Class A / B / C):
+Class A — SELLABLE: Primary opportunity is REVENUE_LEAK with loss > 0, OR unique_opp_types >= 1 with coverage == FULL (3 PDPs inspected).
+Class B — USABLE WITH CAUTION: coverage == PARTIAL (< 3 PDPs inspected).
+Class C — NOT SELLABLE: Unused in current dataset (requires coverage < FULL and zero opportunities).
+What Makes a Lead "SELLABLE" Currently: Scan completion across 3 PDP URLs resulting in at least 1 un-detected feature selector. Class A reflects scan completeness, not commercial opportunity quality.
+DOCUMENT 2: SYSTEM CONTRACTS
+SYSTEM CONTRACTS — REVENUELEAKSCANNER V2
+CONTRACT MATRIX OVERVIEW
+Contract ID	Name	Core Guarantee
+CONTRACT-PDP-001	PDP / Page Validity Contract	Opportunity engines must ONLY run on verified, real PDP pages
+CONTRACT-STATE-001	TRUE / FALSE / UNKNOWN State Contract	Mandatory 3-state detection model; UNKNOWN never generates an opportunity
+CONTRACT-EVIDENCE-001	Finding Evidence Contract	Finding-level 1:1 screenshot state binding; no generic session screenshots
+CONTRACT-VARIANT-001	Variant Identity Contract	out_of_stock=True requires confirmed unavailable SKU, not generic disabled UI
+CONTRACT-BIS-001	Back-In-Stock Contract	REVENUE_LEAK requires validated OOS + verified absence of BIS modal
+CONTRACT-REVIEW-001	Review Detection Contract	Selector failure != review absence; UNKNOWN suppresses MISSING_SOCIAL_PROOF
+CONTRACT-UPSELL-001	Upsell Detection Contract	Selector failure != upsell absence; defaults to UPSELL_UNKNOWN
+CONTRACT-STICKY-001	Sticky ATC Contract	Requires behavioral scroll verification + expanded mobile selector coverage
+CONTRACT-IMPACT-001	Commercial Impact Contract	Explicit provenance tagging: MEASURED vs BENCHMARK vs FALLBACK
+CONTRACT-CONFIDENCE-001	Confidence Contract	Per-lead dynamic score reflecting evidence quality, page validity & certainty
+CONTRACT-CLASSIFICATION-001	Lead Classification Contract	Class A requires confirmed strong opportunity + valid evidence quality gate
+CONTRACT-DEDUP-001	Identity & Deduplication Contract	Deduplication based on SKU/domain identity, not URL string coincidence
+CONTRACT-ENRICH-001	Enrichment Contract	SUCCESS requires actual populated data; missing contacts = PARTIAL
+CONTRACT-EXPORT-001	Lead Export Contract	100% truthful, traceable fields with verified disk-relative artifact paths
+CONTRACT-PDP-001: PDP / Page Validity Contract
+PURPOSE: Prevent opportunity engines from executing on Cloudflare challenges, error pages, collection pages, or editorial pages.
+INPUT GUARANTEE: A Playwright Page instance navigated to a target candidate URL.
+OUTPUT GUARANTEE: A strongly-typed PAGE_STATE classification:
+REAL_PRODUCT
+CLOUDFLARE_BLOCKED
+ACCESS_DENIED
+NOT_PRODUCT (Collection, Blog, Cart, Checkout)
+REDIRECTED
+ERROR_PAGE
+LOGIN_REQUIRED
+UNKNOWN
+INVARIANTS:
+Opportunity engines MUST NOT execute if PAGE_STATE != REAL_PRODUCT.
+UNKNOWN or CLOUDFLARE_BLOCKED state MUST immediately terminate scan for that URL with status BLOCKED / SKIPPED.
+FORBIDDEN STATES:
+Generating any CommercialOpportunity on a page where PAGE_STATE != REAL_PRODUCT.
+Using Cloudflare interstitial titles (e.g. "Connexion en cours...") as product_name or company_name.
+FAILURE BEHAVIOR: Return PAGE_STATE.BLOCKED or PAGE_STATE.NOT_PRODUCT, log diagnostic warning, discard PDP result.
+DOWNSTREAM ASSUMPTIONS: Opportunity engines can safely assume the DOM represents a single, active Shopify product page.
+TEST REQUIREMENTS: Test against Cloudflare 403 html, Shopify collection pages (/collections/all), blog articles (/blogs/news), 404 pages, and valid product pages.
+CONTRACT-STATE-001: TRUE / FALSE / UNKNOWN State Contract
+PURPOSE: Enforce a strict 3-state detection model across all primary opportunity engines.
+INPUT GUARANTEE: Validated DOM context on a REAL_PRODUCT page.
+OUTPUT GUARANTEE: Detection state MUST evaluate strictly to TRUE, FALSE, or UNKNOWN.
+INVARIANTS:
+UNKNOWN MUST NEVER generate a commercial opportunity.
+Converting "selector not found" directly into "feature absent" without positive evidence of absence is strictly forbidden.
+FORBIDDEN STATES:
+Binary True/False flags where negative detection implies commercial problem.
+FAILURE BEHAVIOR: Fallback to UNKNOWN state on any ambiguous selector match or evaluation timeout.
+DOWNSTREAM ASSUMPTIONS: CommercialOpportunity generator receives explicit, verified states only.
+TEST REQUIREMENTS: Assert that an unrecognised DOM layout returns UNKNOWN and yields 0 commercial opportunities.
+CONTRACT-EVIDENCE-001: Finding Evidence Contract
+PURPOSE: Guarantee 1:1 binding between a commercial finding and the visual screenshot of the exact page state that produced it.
+INPUT GUARANTEE: Playwright Page execution context captured IMMEDIATELY after finding evaluation on that specific PDP.
+OUTPUT GUARANTEE: A unique VisualEvidence object with verified PNG bytes, valid dimensions, SHA-256 hash, and readable disk path.
+INVARIANTS:
+Every Finding MUST have its own unique screenshot PNG captured at the time of PDP inspection.
+Two findings from different PDP URLs MUST NOT share the same screenshot PNG hash.
+VisualEvidence.relative_path MUST point to a valid, physically existing file on disk (storage/sessions/...).
+FORBIDDEN STATES:
+Reusing a single session-level screenshot across multiple PDP findings.
+Storing pseudo-URLs or HTTP endpoints in relative_path.
+Setting evidence.valid = True when the screenshot depicts an interstitial, blank, or error page.
+FAILURE BEHAVIOR: Mark finding evidence as INSUFFICIENT, lower confidence rating, demote lead classification.
+DOWNSTREAM ASSUMPTIONS: Exporters and PDF drivers can directly load and render the screenshot file from relative_path.
+TEST REQUIREMENTS: Assert that 3 inspected PDPs generate 3 distinct PNG files with 3 unique SHA-256 hashes on disk.
+CONTRACT-VARIANT-001: Variant Identity Contract
+PURPOSE: Ensure out_of_stock = True represents a genuine unavailable product variant SKU.
+INPUT GUARANTEE: DOM elements matching variant picker controls on a REAL_PRODUCT page.
+OUTPUT GUARANTEE: Confirmed OOS status + human-readable variant SKU name.
+INVARIANTS:
+Generic disabled Add-to-Cart buttons (disabled before option selection) MUST NOT be classified as OOS variants.
+Loading states, unselected option placeholders, and disabled quantity steppers MUST NOT trigger out_of_stock = True.
+Raw opaque variant IDs (e.g. "7038539891054") MUST be flagged for translation or marked AMBIGUOUS.
+FORBIDDEN STATES:
+Classifying a pre-selection disabled CTA as an OOS variant.
+Matching non-variant elements via broad class name substring matches (e.g. .slider-disabled).
+FAILURE BEHAVIOR: Return VariantState.AMBIGUOUS or VariantState.UNKNOWN.
+DOWNSTREAM ASSUMPTIONS: Revenue Leak engine receives only confirmed OOS variant states.
+TEST REQUIREMENTS: Mock pre-selection disabled ATC button -> assert out_of_stock == False. Mock real disabled size pill -> assert out_of_stock == True.
+CONTRACT-BIS-001: Back-in-Stock Contract
+PURPOSE: Ensure REVENUE_LEAK opportunities are generated ONLY when OOS is confirmed AND BIS capture is proven absent.
+INPUT GUARANTEE: A confirmed OOS variant page state (VariantState.OUT_OF_STOCK).
+OUTPUT GUARANTEE: REVENUE_LEAK opportunity generated ONLY if all 5 conditions are satisfied:
+PAGE_STATE == REAL_PRODUCT
+Product variant identified & verified OOS
+BIS detection executed ON THAT SPECIFIC OOS PAGE STATE
+BIS notification form/button proven absent (BISState.ABSENT)
+Evidence PNG captured of the OOS state
+INVARIANTS:
+BIS Checker MUST NOT execute on in-stock or unverified page states.
+If BIS state is UNKNOWN (e.g. dynamic modal unverified), REVENUE_LEAK MUST NOT fire.
+FORBIDDEN STATES:
+Generating REVENUE_LEAK when out_of_stock = False.
+Generating REVENUE_LEAK when BIS detection is UNKNOWN.
+FAILURE BEHAVIOR: Set opportunity status to UNVERIFIED / NONE.
+DOWNSTREAM ASSUMPTIONS: Financial impact calculator computes loss strictly on verified REVENUE_LEAK leads.
+TEST REQUIREMENTS: Test OOS page with Klaviyo BIS modal -> 0 REVENUE_LEAK opportunities. Test OOS page without BIS -> 1 REVENUE_LEAK opportunity.
+CONTRACT-REVIEW-001: Review Detection Contract
+PURPOSE: Prevent false MISSING_SOCIAL_PROOF findings for stores using unlisted or enterprise review platforms.
+INPUT GUARANTEE: DOM context and page script resources of a REAL_PRODUCT page.
+OUTPUT GUARANTEE: ReviewState: REVIEWS_CONFIRMED_PRESENT, REVIEWS_CONFIRMED_ABSENT, or REVIEWS_UNKNOWN.
+INVARIANTS:
+Selector failure across hardcoded platforms MUST evaluate to REVIEWS_UNKNOWN, NOT REVIEWS_CONFIRMED_ABSENT.
+MISSING_SOCIAL_PROOF MUST ONLY fire if ReviewState == REVIEWS_CONFIRMED_ABSENT (verified via multi-layer inspection: JSON-LD AggregateRating, star text regex, generic DOM class patterns).
+FORBIDDEN STATES:
+Generating MISSING_SOCIAL_PROOF when review state is REVIEWS_UNKNOWN.
+Ignoring JSON-LD schema.org AggregateRating metadata present in the page head.
+FAILURE BEHAVIOR: Set state to REVIEWS_UNKNOWN, suppress opportunity generation.
+DOWNSTREAM ASSUMPTIONS: Any MISSING_SOCIAL_PROOF lead represents a verified absence of customer reviews.
+TEST REQUIREMENTS: Test page with JSON-LD reviews -> REVIEWS_CONFIRMED_PRESENT. Test page with unknown review widget -> REVIEWS_UNKNOWN (0 opportunities).
+CONTRACT-UPSELL-001: Upsell Detection Contract
+PURPOSE: Prevent false MISSING_UPSELL findings based solely on 8 CSS selector checks.
+INPUT GUARANTEE: DOM context of a REAL_PRODUCT page.
+OUTPUT GUARANTEE: UpsellState: PRESENT, ABSENT, or UNKNOWN.
+INVARIANTS:
+Absence of 8 CSS selectors MUST evaluate to UpsellState.UNKNOWN.
+MISSING_UPSELL MUST NOT be exported as a sellable commercial opportunity until behavioral cart-drawer inspection is implemented.
+FORBIDDEN STATES:
+Classifying a lead as Class A based solely on MISSING_UPSELL.
+FAILURE BEHAVIOR: Default to UpsellState.UNKNOWN, output 0 commercial opportunities.
+DOWNSTREAM ASSUMPTIONS: Lead exporter ignores MISSING_UPSELL for Class A qualification.
+TEST REQUIREMENTS: Assert that selector absence returns UpsellState.UNKNOWN and generates no Class A lead.
+CONTRACT-STICKY-001: Sticky ATC Contract
+PURPOSE: Guarantee sticky ATC evaluation reflects the real mobile viewport purchase experience.
+INPUT GUARANTEE: Mobile Playwright context (375x667, mobile UA, touch enabled) on a REAL_PRODUCT page with scrollHeight >= 1200px.
+OUTPUT GUARANTEE: StickyATCState: PRESENT, ABSENT, or UNKNOWN.
+INVARIANTS:
+Sticky ATC evaluation MUST include behavioral scroll verification (scroll to 50% height, evaluate fixed/sticky CTA element in lower viewport fold).
+Selector inspection MUST check expanded theme patterns (.js-sticky-atc, .product-sticky-bar, [data-sticky], etc.).
+FORBIDDEN STATES:
+Declaring sticky ATC absent on pages with scrollHeight < 1200px.
+Declaring sticky ATC absent without running mobile context scroll evaluation.
+FAILURE BEHAVIOR: Return StickyATCState.UNKNOWN.
+DOWNSTREAM ASSUMPTIONS: MISSING_STICKY_ATC leads represent verified mobile conversion friction.
+TEST REQUIREMENTS: Mobile scroll test on fixed bottom bar -> PRESENT. Mobile scroll test on un-stickied page -> ABSENT.
+CONTRACT-IMPACT-001: Commercial Impact Contract
+PURPOSE: Ensure financial loss estimations explicitly disclose parameter provenance.
+INPUT GUARANTEE: TransientScanContext with verified OOS metrics and optional measured traffic/AOV.
+OUTPUT GUARANTEE: CommercialCalculationResult with explicit ParameterSource provenance tags (PRIMARY_MEASURED, BENCHMARK_CATEGORY, FALLBACK_ASSUMED).
+INVARIANTS:
+Fallback traffic (50k) and fallback AOV ($65) MUST be tagged as FALLBACK_ASSUMED.
+Financial loss output MUST include explicit framing text: "Benchmark Scenario Estimate".
+Benchmark assumptions MUST NEVER be presented as store-specific facts.
+FORBIDDEN STATES:
+Labeling fallback revenue loss as "Actual Measured Store Revenue Loss".
+FAILURE BEHAVIOR: Apply mandatory confidence penalties (-0.30 for fallback traffic, -0.05 for fallback AOV).
+DOWNSTREAM ASSUMPTIONS: Buyer presentation UI clearly demarcates estimated vs. measured financial data.
+TEST REQUIREMENTS: Verify that output DTO contains has_fallback_parameters = True and explicit benchmark footnote.
+CONTRACT-CONFIDENCE-001: Confidence Contract
+PURPOSE: Provide a dynamic, per-lead confidence rating reflecting true data & evidence quality.
+INPUT GUARANTEE: Page validity state, engine detection certainty, evidence verification status, and financial provenance.
+OUTPUT GUARANTEE: confidence_score float between 0.0 and 1.0.
+INVARIANTS:
+Confidence rating MUST NOT be a fixed static constant across all leads.
+confidence_score MUST factor: page validity (+0.3), finding certainty (+0.3), evidence quality (+0.2), measured parameters (+0.2).
+Any lead with fallback financial parameters MUST be capped at confidence_score <= 0.69.
+FORBIDDEN STATES:
+Returning 0.65 uniformly for all generated leads.
+FAILURE BEHAVIOR: Demote confidence score to < 0.50 on unverified evidence or partial coverage.
+DOWNSTREAM ASSUMPTIONS: Lead classification logic uses confidence_score as a quality gate.
+TEST REQUIREMENTS: Test lead with full measured data -> confidence >= 0.85. Test lead with fallback traffic -> confidence <= 0.69.
+CONTRACT-CLASSIFICATION-001: Lead Classification Contract
+PURPOSE: Ensure Class A "SELLABLE" status reflects true commercial opportunity quality, not scan completion.
+INPUT GUARANTEE: SessionBundle containing validated findings, evidence statuses, and commercial impact.
+OUTPUT GUARANTEE: lead_class: A — SELLABLE, B — USABLE WITH CAUTION, or C — NOT SELLABLE.
+INVARIANTS:
+Class A REQUIRES either: (a) Verified REVENUE_LEAK finding, OR (b) Verified MISSING_STICKY_ATC with confidence_score >= 0.65 and evidence_status == VERIFIED.
+Leads with only MISSING_UPSELL or UNVERIFIED findings MUST NOT be classified as Class A.
+Leads with PAGE_STATE != REAL_PRODUCT or contaminated evidence MUST be classified as Class C — NOT SELLABLE.
+FORBIDDEN STATES:
+Assigning Class A based purely on coverage == FULL and selector absence.
+FAILURE BEHAVIOR: Downgrade to Class B or Class C.
+DOWNSTREAM ASSUMPTIONS: Buyers receiving Class A leads receive high-precision commercial opportunities.
+TEST REQUIREMENTS: Session with only MISSING_UPSELL -> Class B. Session with Cloudflare wall -> Class C. Session with verified OOS -> Class A.
+CONTRACT-DEDUP-001: Identity & Deduplication Contract
+PURPOSE: Ensure store, product, and variant entities are deduplicated at the true domain identity level.
+INPUT GUARANTEE: Ingested store domains and scraped PDP variant attributes.
+OUTPUT GUARANTEE: Deduplicated finding matrices and financial OOS ratios.
+INVARIANTS:
+1 Target Domain = Exactly 1 CommercialLeadRecord.
+Duplicate URLs pointing to the same product SKU MUST NOT double-count OOS variants in impact_calculator.py.
+Variant identity deduplication MUST use (product_id/handle, variant_id/name) composite keys.
+FORBIDDEN STATES:
+Incrementing variants_oos multiple times for the same OOS variant discovered on 2 URL variants of the same product.
+FAILURE BEHAVIOR: Merge duplicate variant records prior to financial calculation.
+DOWNSTREAM ASSUMPTIONS: oos_frequency_pct reflects unique variant availability ratio.
+TEST REQUIREMENTS: Pass 2 PDP results containing the same OOS variant ID -> verify variants_oos = 1.
+CONTRACT-ENRICH-001: Enrichment Contract
+PURPOSE: Guarantee enrichment status accurately reflects contact data population.
+INPUT GUARANTEE: SessionBundle passed to post-scan enrichment pass.
+OUTPUT GUARANTEE: enrichment_status: SUCCESS, PARTIAL, FAILED, or NOT_ATTEMPTED.
+INVARIANTS:
+enrichment_status = "SUCCESS" REQUIRES at least one verified direct contact method (contact_email OR contact_phone).
+If only inferred contact_page is available, enrichment_status MUST be "PARTIAL".
+company_name MUST be extracted from brand metadata (OG site_name, JSON-LD publisher), NOT raw product page titles.
+FORBIDDEN STATES:
+Setting enrichment_status = "SUCCESS" when contact_email and contact_phone are both null.
+Labeling hardcoded /pages/contact URLs as contact_page_source = "DOM_LINK".
+FAILURE BEHAVIOR: Set enrichment_status = "PARTIAL", record diagnostic notes.
+DOWNSTREAM ASSUMPTIONS: Cold outreach pipelines rely on enrichment_status to determine automation readiness.
+TEST REQUIREMENTS: Run enricher with no emails found -> assert enrichment_status == "PARTIAL" and contact_page_source == "INFERRED_SHOPIFY_CONVENTION".
+CONTRACT-EXPORT-001: Lead Export Contract
+PURPOSE: Guarantee exported lead JSON and CSV files contain 100% truthful, valid, and disk-resolvable data.
+INPUT GUARANTEE: Assembled CommercialLeadRecord items.
+OUTPUT GUARANTEE: leads.json and leads.csv written to output directory with zero pseudo-paths.
+INVARIANTS:
+screenshot_evidence_path MUST resolve to a physically existing, readable file on disk.
+All financial loss figures MUST include loss basis and fallback disclosures.
+Every exported record MUST pass CommercialLeadRecord Pydantic validation.
+FORBIDDEN STATES:
+Exporting screenshot_evidence_path containing https:// pseudo-URLs.
+Exporting contaminated or Class C records in the primary sales feed.
+FAILURE BEHAVIOR: Throw ExportValidationError, abort export run.
+DOWNSTREAM ASSUMPTIONS: CRM tools and sales teams can directly ingest exported files without path resolution errors.
+TEST REQUIREMENTS: Read exported leads.json -> verify Path(lead["screenshot_evidence_path"]).exists() == True.
+DOCUMENT 3: DOMAIN STATE MODEL
+DOMAIN STATE MODEL — REVENUELEAKSCANNER V2
+
+                       ┌─────────────────────────┐
+                       │    DISCOVERED (URL)     │
+                       └────────────┬────────────┘
+                                    │
+                                    ▼
+                       ┌─────────────────────────┐
+                       │       NAVIGATING        │
+                       └────────────┬────────────┘
+                                    │
+         ┌──────────────────────────┼──────────────────────────┐
+         ▼                          ▼                          ▼
+┌─────────────────┐        ┌─────────────────┐        ┌─────────────────┐
+│  REAL_PRODUCT   │        │BLOCKED/CHALLENGE│        │   NOT_PRODUCT   │
+└────────┬────────┘        └────────┬────────┘        └────────┬────────┘
+         │                          │                          │
+         ▼                          ▼                          ▼
+┌─────────────────┐        ┌─────────────────┐        ┌─────────────────┐
+│RUN SCAN ENGINES │        │  TERMINATE PDP  │        │  TERMINATE PDP  │
+└─────────────────┘        └─────────────────┘        └─────────────────┘
+1. PAGE STATE MACHINE (PageState)
+States
+DISCOVERED: Candidate URL extracted by discovery engine.
+NAVIGATING: Playwright page load in progress.
+REAL_PRODUCT: Page verified as an authentic, active single-product detail page.
+NOT_PRODUCT: Verified as a collection index, blog post, cart, checkout, or policy page.
+BLOCKED: Cloudflare challenge, bot verification interstitial, 403 Forbidden, or geo-block.
+ERROR: 404 Not Found, 500 Server Error, DNS resolution failure, or navigation timeout.
+UNKNOWN: Unclassified page state due to evaluation failure.
+Transitions
+DISCOVERED -> NAVIGATING
+NAVIGATING -> REAL_PRODUCT | NOT_PRODUCT | BLOCKED | ERROR | UNKNOWN
+Rules & Invariants
+FORBIDDEN TRANSITION: BLOCKED -> REAL_PRODUCT
+FORBIDDEN TRANSITION: NOT_PRODUCT -> REAL_PRODUCT
+FORBIDDEN TRANSITION: UNKNOWN -> REAL_PRODUCT (Requires positive structural verification)
+SYSTEM INVARIANT: Scan engines (Variant, BIS, CRO) MUST ONLY execute when PageState == REAL_PRODUCT.
+2. VARIANT STATE MACHINE (VariantState)
+States
+UNKNOWN: Variant availability cannot be conclusively determined.
+IN_STOCK: Variant is available for purchase (ATC button enabled, stock confirmed).
+OUT_OF_STOCK: Variant is confirmed out of stock (disabled pill/option, explicit sold-out indicator).
+AMBIGUOUS: Element disabled due to pre-selection requirement, loading state, or non-variant UI.
+Transitions
+UNKNOWN -> IN_STOCK | OUT_OF_STOCK | AMBIGUOUS
+AMBIGUOUS -> IN_STOCK | OUT_OF_STOCK (After option selection click interaction)
+Rules & Invariants
+AMBIGUOUS MUST NEVER transition directly to OUT_OF_STOCK without click verification.
+UNKNOWN MUST NEVER trigger a REVENUE_LEAK commercial opportunity.
+3. BACK-IN-STOCK STATE MACHINE (BISState)
+States
+PRESENT: Active Back-In-Stock notification modal, form, or trigger button detected on OOS page.
+ABSENT: BIS mechanism verified absent on confirmed OOS page state.
+UNKNOWN: Page state not OOS, or BIS detection inconclusive.
+Transitions
+UNKNOWN -> PRESENT | ABSENT (Valid ONLY when VariantState == OUT_OF_STOCK)
+Rules & Invariants
+BIS evaluation is INVALID if VariantState != OUT_OF_STOCK.
+ABSENT + VariantState.OUT_OF_STOCK -> Triggers REVENUE_LEAK candidate.
+UNKNOWN -> Suppresses REVENUE_LEAK candidate.
+4. REVIEW STATE MACHINE (ReviewState)
+States
+PRESENT: Customer review widget, rating stars, or JSON-LD AggregateRating verified.
+ABSENT: Social proof verified absent via multi-layer DOM + JSON-LD + text pattern audit.
+UNKNOWN: Hardcoded selectors absent, but broader absence cannot be conclusively proven.
+Transitions
+UNKNOWN -> PRESENT | ABSENT
+Rules & Invariants
+UNKNOWN MUST NOT transition to ABSENT based solely on CSS selector failure.
+ABSENT -> Triggers MISSING_SOCIAL_PROOF candidate.
+UNKNOWN -> 0 commercial opportunities.
+5. UPSELL STATE MACHINE (UpsellState)
+States
+PRESENT: Product recommendations, cross-sell modules, or cart drawer upsells verified.
+ABSENT: Upsell infrastructure verified absent via multi-surface inspection.
+UNKNOWN: Recommendation selectors absent; behavioral cart state unverified.
+Transitions
+UNKNOWN -> PRESENT | ABSENT
+Rules & Invariants
+Default state for non-behavioral inspection is UNKNOWN.
+UNKNOWN MUST NOT generate a Class A commercial lead.
+6. STICKY ATC STATE MACHINE (StickyATCState)
+States
+PRESENT: Persistent purchase CTA verified in mobile viewport fold during page scroll.
+ABSENT: Page scrollHeight >= 1200px and no sticky CTA accessible in lower fold.
+UNKNOWN: Page scrollHeight < 1200px or mobile viewport inspection incomplete.
+Transitions
+UNKNOWN -> PRESENT | ABSENT (Requires mobile context scroll evaluation)
+Rules & Invariants
+ABSENT + scrollHeight >= 1200 -> Triggers MISSING_STICKY_ATC candidate.
+UNKNOWN -> Suppresses opportunity.
+7. EVIDENCE STATE MACHINE (EvidenceState)
+States
+CAPTURED: Screenshot PNG bytes collected from Playwright page context.
+VALID: PNG stream verified (non-corrupt, >=1024x600, non-blank canvas).
+INVALID: PNG stream corrupt, sub-minimum dimensions, or blank canvas.
+RELEVANT: Screenshot visually matches the exact product & finding state.
+IRRELEVANT: Screenshot depicts a different PDP, Cloudflare wall, or stale state.
+MISSING: No screenshot captured.
+Transitions
+CAPTURED -> VALID | INVALID
+VALID -> RELEVANT | IRRELEVANT
+Rules & Invariants
+Lead export REQUIRES EvidenceState == RELEVANT.
+IRRELEVANT or INVALID evidence demotes lead to Class C — NOT SELLABLE.
+8. COMMERCIAL FINDING STATE MACHINE (FindingState)
+States
+CANDIDATE: Finding generated by primary opportunity engine.
+CONFIRMED: Finding validated against page state, evidence relevance, and confidence gate.
+REJECTED: Finding failed quality gate (unverified page state, false positive pattern).
+UNKNOWN: Finding certainty inconclusive.
+Transitions
+CANDIDATE -> CONFIRMED | REJECTED | UNKNOWN
+Rules & Invariants
+FORBIDDEN TRANSITION: UNKNOWN -> CONFIRMED without new positive evidence.
+FORBIDDEN TRANSITION: UNKNOWN -> SELLABLE (Class A).
+ONLY CONFIRMED findings are eligible for commercial lead export.
+DOCUMENT 4: SYSTEM INVARIANTS
+SYSTEM INVARIANTS — REVENUELEAKSCANNER V2
+Every system component, scanner engine, commercial calculator, and lead exporter MUST strictly satisfy all system invariants listed below.
+
+CORE INVARIANTS MATRIX
+INV-001: A blocked, interstitial, or non-product page (PageState != REAL_PRODUCT) MUST NEVER produce a commercial opportunity or lead.
+INV-002: An UNKNOWN detection state MUST NEVER be converted into a TRUE commercial opportunity or a Class A lead without new positive evidence.
+INV-003: Every Finding MUST reference the exact, unique Playwright page state and URL from which it was evaluated.
+INV-004: Every visual evidence artifact (screenshot_evidence_path) MUST exist as a physically readable file on disk at export time.
+INV-005: Two separate findings from different PDP URLs MUST NOT silently share the exact same screenshot file or SHA-256 PNG hash.
+INV-006: A disabled generic button (such as an Add-to-Cart button disabled before variant option selection) MUST NOT be accepted as evidence of an out-of-stock variant.
+INV-007: The absence of a specific CSS selector signature MUST NOT be treated as automatic proof of feature absence.
+INV-008: Fallback benchmark financial parameters (traffic, AOV, CR) MUST NEVER be represented as measured store-specific facts.
+INV-009: Scan coverage completeness (coverage == FULL) MUST NOT by itself determine commercial lead classification (Class A).
+INV-010: An engine execution finishing without throwing an exception DOES NOT imply enrichment_status = SUCCESS.
+INV-011: Deduplication of store, product, and variant entities MUST occur at the true domain identity level, not via URL string coincidence.
+INV-012: Downstream engines MUST reject invalid or unverified upstream contracts instead of silently accepting contaminated inputs.
+INV-013: One target domain MUST produce exactly one CommercialLeadRecord (1 Store = 1 Lead invariant).
+INV-014: The PostScanEnricher pass MUST be completely isolated and incapable of mutating core scan findings or SessionBundle checksums.
+INV-015: The SessionBundle disk persistence layer MUST remain strictly Write-Once (no overwrites, updates, or mutations after checksum seal).
+DOCUMENT 5: FAILURE POLICY
+FAILURE POLICY — REVENUELEAKSCANNER V2
+COMMERCIAL CONSERVATISM PRINCIPLE
+When in doubt, evaluate to UNKNOWN and issue NO COMMERCIAL CLAIM.
+The system must NEVER convert ambiguity, timeouts, or detection failures into commercial opportunities.
+
+EDGE CASE & FAILURE HANDLING MATRIX
+Failure Mode	System Reaction	Domain State	Opportunity Result	Lead Impact
+Cloudflare / Bot Challenge	Immediately abort PDP scan loop for this domain	PageState.BLOCKED	0 Opportunities	Demote to Class C — NOT SELLABLE
+HTTP 403 / 404 / 500 Error	Discard PDP URL, attempt remaining candidates	PageState.ERROR	0 Opportunities	Downgrade coverage rating
+Navigation Timeout (>15s)	Close page context, open clean page, continue scan	PageState.ERROR	0 Opportunities	Record diagnostic log
+Partial DOM / Slow Load	Wait up to 5s for network idle; fallback to initial DOM	PageState.UNKNOWN	Suppress opportunities	Lower confidence score
+Pre-Selection Disabled ATC	Perform forced click interaction to verify option state	VariantState.AMBIGUOUS	0 OOS opportunities	Suppress REVENUE_LEAK
+Unrecognized Review System	Multi-layer audit (JSON-LD, star text, generic classes)	ReviewState.UNKNOWN	0 Opportunities	Suppress MISSING_SOCIAL_PROOF
+Unrecognized Upsell System	Evaluate CSS module containers	UpsellState.UNKNOWN	0 Opportunities	Exclude from Class A gate
+Sticky ATC Mobile Check Error	Log warning, set state to UNKNOWN	StickyATCState.UNKNOWN	0 Opportunities	Exclude from Class A gate
+Screenshot Failure	Attempt window.stop() fallback screenshot capture	EvidenceState.MISSING	Mark unverified	Demote to Class C
+Evidence / URL Mismatch	Re-verify page URL against screenshot metadata	EvidenceState.IRRELEVANT	Mark unverified	Demote to Class C
+Enrichment Network Failure	Catch exception, record error string in array	EnrichStatus.FAILED	No scan mutation	Set contact_email = null
+Contact Data Missing	Default email/phone to null, record NOT_FOUND	EnrichStatus.PARTIAL	No scan mutation	contact_page_source = INFERRED
+DOCUMENT 6: CONTRACT TEST MATRIX
+CONTRACT TEST MATRIX — REVENUELEAKSCANNER V2
+This matrix defines the required behavioral tests that MUST fail if any system contract or invariant is broken by future code changes.
+
+BEHAVIORAL TEST MATRIX
+1. PDP / Page Validity (CONTRACT-PDP-001)
+test_cloudflare_page_returns_blocked_and_zero_opportunities(): Mock HTML containing Cloudflare challenge text -> assert PageState == BLOCKED, 0 opportunities generated.
+test_collection_page_returns_not_product(): Mock /collections/all page -> assert PageState == NOT_PRODUCT, scan loop skips page.
+test_valid_pdp_returns_real_product(): Mock valid Shopify PDP HTML -> assert PageState == REAL_PRODUCT.
+2. Variant & OOS Detection (CONTRACT-VARIANT-001)
+test_disabled_atc_before_selection_does_not_trigger_oos(): Mock PDP where ATC button is <button name="add" disabled> before size pick -> assert out_of_stock == False.
+test_real_disabled_size_pill_triggers_oos(): Mock size swatch with disabled radio input -> assert out_of_stock == True and scanned_variant extracted correctly.
+test_ambiguous_control_returns_variant_unknown(): Mock custom disabled form control -> assert VariantState == UNKNOWN.
+3. Back-in-Stock (CONTRACT-BIS-001)
+test_oos_variant_with_klaviyo_bis_modal_yields_zero_revenue_leak(): Mock OOS page containing .klaviyo-bis-trigger -> assert notify_detected == True, 0 REVENUE_LEAK opportunities.
+test_oos_variant_without_bis_modal_yields_revenue_leak(): Mock OOS page with no BIS elements -> assert notify_detected == False, 1 REVENUE_LEAK opportunity generated.
+4. Social Proof & Reviews (CONTRACT-REVIEW-001)
+test_page_with_jsonld_reviews_returns_reviews_present(): Mock page with schema.org AggregateRating JSON-LD -> assert review_widget_detected == True, 0 MISSING_SOCIAL_PROOF opportunities.
+test_unrecognized_review_system_returns_unknown_and_zero_opportunities(): Mock unknown custom review widget -> assert ReviewState == UNKNOWN, 0 MISSING_SOCIAL_PROOF opportunities.
+5. Upsell & Recommendations (CONTRACT-UPSELL-001)
+test_upsell_selector_absence_returns_unknown_state(): Mock page where 8 upsell selectors are absent -> assert UpsellState == UNKNOWN, 0 Class A lead qualifications based on upsell.
+6. Sticky ATC (CONTRACT-STICKY-001)
+test_sticky_atc_mobile_scroll_verification(): Mock mobile context (375x667), scroll to 500px, mock fixed bottom ATC bar -> assert sticky_atc_detected == True.
+test_short_pdp_does_not_trigger_missing_sticky_atc(): Mock PDP with scrollHeight = 800px -> assert 0 MISSING_STICKY_ATC opportunities.
+7. Evidence Binding (CONTRACT-EVIDENCE-001)
+test_each_pdp_finding_has_unique_screenshot_hash(): Scan 3 PDPs -> assert findings[0].evidence.sha256_hash != findings[1].evidence.sha256_hash != findings[2].evidence.sha256_hash.
+test_screenshot_path_points_to_existing_file(): Inspect exported CommercialLeadRecord -> assert Path(lead.screenshot_evidence_path).exists() == True.
+8. Deduplication (CONTRACT-DEDUP-001)
+test_duplicate_url_variants_do_not_double_count_oos(): Pass 2 PDP results with identical OOS variant SKU ID -> assert variants_oos == 1 in CommercialImpact.
+9. Lead Classification (CONTRACT-CLASSIFICATION-001)
+test_lead_with_only_missing_upsell_is_not_class_a(): Pass session bundle with only MISSING_UPSELL -> assert lead_class == "B — USABLE WITH CAUTION".
+test_lead_with_cloudflare_evidence_is_class_c(): Pass session bundle with Cloudflare page title -> assert lead_class == "C — NOT SELLABLE".
+10. Enrichment (CONTRACT-ENRICH-001)
+test_enrichment_status_partial_when_emails_null(): Run enricher with 0 direct emails -> assert enrichment_status == "PARTIAL" and contact_page_source == "INFERRED_SHOPIFY_CONVENTION".
+DOCUMENT 7: ANTI-REGRESSION PRINCIPLES
+ANTI-REGRESSION PRINCIPLES — REVENUELEAKSCANNER V2
+These 15 principles are derived directly from forensic code audits of RevenueLeakScanner_V2. They represent non-negotiable engineering rules.
+
+Selector failure DOES NOT equal feature absence. Never infer a commercial problem from a missing CSS selector unless positive proof of absence is established.
+Never execute commercial detection before page-type validation. Every candidate URL must be positively verified as a REAL_PRODUCT page before running scanner engines.
+UNKNOWN state MUST NEVER generate a commercial opportunity. Ambiguous detections must default to zero opportunities.
+Never reuse a single session-level screenshot across multiple PDP findings. Every finding must anchor its own verified screenshot captured during that specific PDP inspection.
+PNG stream validity DOES NOT imply claim validity. A valid PNG file of a Cloudflare wall or wrong page is not valid visual evidence for a CRO finding.
+Never present benchmark fallbacks as store-specific facts. Hardcoded parameters (50k traffic, $65 AOV, 2% CR) must be explicitly disclosed as "Benchmark Scenario Estimates".
+Scan coverage completeness DOES NOT determine commercial lead class. Class A status requires evidence quality and confirmed opportunity strength, not just 3 inspected PDPs.
+Never pass unvalidated inputs across engine contracts. Upstream components must guarantee data contracts before downstream consumption.
+Never rely on narrow CSS selector matching for semantic states. Use multi-layer verification (DOM, JSON-LD, ARIA, computed CSS, scroll behavior).
+Never count the same entity multiple times due to URL variations. Deduplication must occur at the true domain/SKU identity level.
+enrichment_status = "SUCCESS" REQUIRES actual populated contact data. A function finishing without throwing an exception is not success.
+Never patch architectural defects with more CSS selectors. If the detection principle is flawed, fix the state model and behavioral verification architecture, not the selector array.
+Define strict system contracts BEFORE writing implementation code. Code must fulfill explicit contract specifications.
+Passing unit tests DOES NOT prove commercial correctness. Tests prove code execution; commercial validity requires forensic proof against real store data.
+Lead quantity IS NOT success if precision is low. A smaller set of verified, evidence-backed leads is infinitely more valuable than hundreds of unverified, false-positive leads.
+DOCUMENT 8: TARGET ARCHITECTURE BOUNDARY
+TARGET ARCHITECTURE BOUNDARY — REVENUELEAKSCANNER V2
+
+[Layer 1: Ingestion & Domain Contracts]
+                 │
+                 ▼
+[Layer 2: Page Validation & PDP Classifier] ◄── Must filter BLOCKED / NOT_PRODUCT pages
+                 │
+                 ▼
+[Layer 3: DOM Observation Engines]        ◄── Evaluates raw DOM / JS signals
+                 │
+                 ▼
+[Layer 4: Domain State Classifiers]       ◄── Assigns TRUE / FALSE / UNKNOWN states
+                 │
+                 ▼
+[Layer 5: Per-Finding Evidence Engine]    ◄── Captures 1:1 PDP screenshot PNG
+                 │
+                 ▼
+[Layer 6: Commercial Opportunity Evaluator]◄── Applies state rules (UNKNOWN -> 0 Opps)
+                 │
+                 ▼
+[Layer 7: Financial Impact Calculator]    ◄── Computes loss with explicit provenance
+                 │
+                 ▼
+[Layer 8: Quality Gate & Lead Classifier] ◄── Enforces Class A evidence requirements
+                 │
+                 ▼
+[Layer 9: Post-Scan Enricher (Isolated)]  ◄── Appends contact metadata safely
+                 │
+                 ▼
+[Layer 10: Lead Exporter]                 ◄── Writes verified leads.json / leads.csv
+LAYER BOUNDARIES & PERMITTED KNOWLEDGE
+Layer 1: Ingestion (StoreRecord)
+Knows: Target domain string, root URL, industry, country.
+Does NOT Know: Playwright, DOM, findings, commercial class, export paths.
+Layer 2: Page Validation (PageValidator)
+Knows: Playwright Page, HTTP response status, page title, header signatures, body text snippets.
+Output: PageState enum (REAL_PRODUCT, CLOUDFLARE_BLOCKED, NOT_PRODUCT, ERROR).
+Does NOT Know: CRO findings, variant availability, financial loss, lead priority.
+Layer 3: Observation Engines (VariantMatrix, BISChecker, CRODetector)
+Knows: Playwright Page context, DOM selectors, JSON-LD, ARIA attributes, mobile viewports.
+Output: Raw observation data (element lists, text matches, computed styles).
+Does NOT Know: Commercial opportunity definitions, lead classification, financial loss.
+Layer 4: State Classifiers (DomainStateClassifier)
+Knows: Raw observation data from Layer 3.
+Output: VariantState, BISState, ReviewState, UpsellState, StickyATCState (each strictly TRUE, FALSE, or UNKNOWN).
+Does NOT Know: Financial formulas, lead class (A/B/C), PDF formatting.
+Layer 5: Per-Finding Evidence Engine (EvidenceCollector, EvidenceBuilder)
+Knows: Active PDP Playwright Page, finding metadata.
+Output: Dedicated VisualEvidence object with unique PNG bytes, SHA-256 hash, and physical disk path.
+Does NOT Know: Commercial lead scoring, buyer agency pitch.
+Layer 6: Opportunity Evaluator (OpportunityEvaluator)
+Knows: Domain states from Layer 4.
+Output: list[CommercialOpportunity] (Generated ONLY when state is verified TRUE / ABSENT per contract; UNKNOWN state yields 0 opportunities).
+Does NOT Know: Screenshots, financial formulas, CSV exporting.
+Layer 7: Impact Calculator (CommercialImpactCalculator)
+Knows: Verified CommercialOpportunity items, OOS variant counts, traffic/AOV data.
+Output: CommercialCalculationResult with explicit ParameterSource provenance records.
+Does NOT Know: Playwright DOM selectors, PDF layout templates.
+Layer 8: Quality Gate & Lead Classifier (LeadClassifier)
+Knows: Findings, evidence validity, confidence score, financial loss.
+Output: lead_class (A — SELLABLE, B — USABLE WITH CAUTION, C — NOT SELLABLE).
+Rules: Class A REQUIRES PageState == REAL_PRODUCT, EvidenceState == RELEVANT, and confirmed strong opportunity type.
+Layer 9: Post-Scan Enricher (PostScanEnricher)
+Knows: Read-only SessionBundle dictionary.
+Output: Additive metadata (brand name, contact page URL, social profiles, status).
+Rules: Operating in an isolated pass. Cannot mutate core scan findings or SessionBundle checksums.
+Layer 10: Lead Exporter (CommercialLeadExporter)
+Knows: Verified CommercialLeadRecord objects.
+Output: leads.json and leads.csv files on disk.
+Rules: Asserts physical existence of all screenshot files before export.
+DOCUMENT 9: PHASE 0 BASELINE REPORT
+PHASE 0 BASELINE & CONTRACTS REPORT
+RevenueLeakScanner V2 — System Specification & Contract Lock
+Date: 2026-08-09
+Phase: Phase 0 — Baseline & Contracts
+Status: COMPLETE (Zero production code modified)
+Audited Files: 15 source files + 3 SessionBundle JSON artifacts
+
+1. EXECUTIVE SUMMARY
+Phase 0 has completed a comprehensive, adversarial forensic baseline audit of RevenueLeakScanner_V2 directly from source code and disk artifacts. Formal system contracts, domain state machines, system invariants, failure policies, anti-regression principles, contract test matrices, and layer architecture boundaries have been authored and locked.
+
+2. SUMMARY OF AUDITED BASELINE & CONTRACT VIOLATIONS
+Critical Baseline Findings in Current Code
+Absence of PDP Validation Layer: Candidate URLs matching /products/ or path digits pass directly to opportunity engines without verifying page authenticity. Cloudflare challenge pages (e.g. drinkhydrant.com, moroccanoil.com, pulpandpress.com) were scraped as valid PDPs.
+Missing UNKNOWN State Model: All primary engines operate on a binary presence/absence model where CSS selector failure is automatically converted into a commercial opportunity.
+Decoupled Session-Level Evidence: EvidenceCollector captures a single screenshot at the end of the store scan loop. All PDP findings inside a session share the identical screenshot PNG and SHA-256 hash.
+Selector-Limited CRO Engines: Review widget detection is hardcoded to 6 platform CSS signatures. Brands using enterprise platforms (Bazaarvoice, Trustpilot) trigger false MISSING_SOCIAL_PROOF findings.
+Scan-Completeness Classification: Class A — SELLABLE is assigned whenever 3 PDPs are inspected and >= 1 opportunity is found, regardless of opportunity strength or evidence relevance.
+Pseudo-URL Evidence Paths: VisualEvidence.relative_path stores https://{domain}/products/{slug}/session_{id}.png which does not exist on disk.
+3. CREATED PHASE 0 SPECIFICATION DOCUMENTS
+CURRENT_SYSTEM_BASELINE.md
+ — Actual architecture trace, data contracts, state model, and commercial flow.
+SYSTEM_CONTRACTS.md
+ — 14 formal system contracts (CONTRACT-PDP-001 through CONTRACT-EXPORT-001).
+DOMAIN_STATE_MODEL.md
+ — 8 formal domain state machines (PageState, VariantState, BISState, ReviewState, UpsellState, StickyATCState, EvidenceState, FindingState).
+SYSTEM_INVARIANTS.md
+ — 15 non-negotiable architectural rules (INV-001 through INV-015).
+FAILURE_POLICY.md
+ — Commercial conservatism rules and error edge-case matrix.
+CONTRACT_TEST_MATRIX.md
+ — 10 behavioral test suites to validate system contracts.
+ANTI_REGRESSION_PRINCIPLES.md
+ — 15 non-negotiable engineering principles derived from audit findings.
+TARGET_ARCHITECTURE_BOUNDARY.md
+ — 10-layer architecture boundary and permitted knowledge matrix.
+PHASE_0_BASELINE_REPORT.md
+ — Master Phase 0 report and dependency roadmap.
+4. TOP 10 NON-NEGOTIABLE ARCHITECTURAL DECISIONS
+PDP Validation Gate (CONTRACT-PDP-001): Opportunity engines MUST NEVER execute on a URL unless PageState == REAL_PRODUCT. Interstitial, Cloudflare, error, and collection pages MUST be terminated immediately.
+Mandatory 3-State Detection (CONTRACT-STATE-001): Every engine MUST support TRUE, FALSE, and UNKNOWN. UNKNOWN state MUST NEVER generate a commercial opportunity.
+1:1 Finding Screenshot Binding (CONTRACT-EVIDENCE-001): Every finding MUST anchor its own unique screenshot PNG captured during that specific PDP inspection. Shared session screenshots are forbidden.
+Absence != Selector Failure (CONTRACT-REVIEW-001 / CONTRACT-UPSELL-001): Failing to find a hardcoded CSS selector MUST evaluate to UNKNOWN, NOT confirmed feature absence.
+Strict OOS Verification (CONTRACT-VARIANT-001): out_of_stock = True REQUIRES a confirmed unavailable variant SKU. Generic disabled buttons before option selection MUST NOT trigger OOS.
+Explicit Financial Provenance (CONTRACT-IMPACT-001): Hardcoded fallback parameters MUST be tagged as FALLBACK_ASSUMED and explicitly labeled "Benchmark Scenario Estimate".
+Dynamic Per-Lead Confidence (CONTRACT-CONFIDENCE-001): confidence_score MUST dynamically evaluate page validity, finding certainty, and evidence quality. Uniform constant scores (e.g. 0.65) are forbidden.
+Evidence Quality Gate for Class A (CONTRACT-CLASSIFICATION-001): Class A — SELLABLE status REQUIRES a confirmed strong opportunity + valid PDP page state + relevant visual evidence. Coverage completeness alone cannot grant Class A status.
+Physical Disk Evidence Pathing (CONTRACT-EXPORT-001): Exported screenshot_evidence_path values MUST resolve to physically existing files on disk.
+Write-Once & Isolated Storage (INV-014 / INV-015): SessionStorage remains strictly Write-Once. Post-scan enrichment operates as an isolated read-only pass that CANNOT mutate core scan findings or checksums.
+5. DEPENDENCY ROADMAP FOR PHASE 1 IMPLEMENTATION
+
+STEP 1: Implement PDP Validation Layer (PageValidator)
+  │
+  ├─► STEP 2: Implement 3-State Model (TRUE / FALSE / UNKNOWN) across Engines
+  │
+  ├─► STEP 3: Implement Per-Finding Evidence Screenshot Binding (1:1 Capture)
+  │
+  ├─► STEP 4: Implement Variant & OOS Pre-Selection Click Verification
+  │
+  ├─► STEP 5: Implement Multi-Layer Review & Social Proof Detector
+  │
+  ├─► STEP 6: Implement Variant Identity Deduplication in Financial Calculator
+  │
+  ├─► STEP 7: Implement Evidence Quality Gate in Commercial Lead Classifier
+  │
+  └─► STEP 8: Fix Disk Relative Screenshot Pathing in Exporter

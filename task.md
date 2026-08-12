@@ -1,0 +1,10 @@
+- [x] Create overlay dismissal utility in navigation_helper.py
+- [x] Call dismissal helper in core_scanner.py and evidence_collector.py
+- [x] Implement behavioral scroll & CSS check for Sticky ATC in cro_stack_detector.py
+- [x] Add has_unresolved_modal field to PDPScanResult in models.py
+- [x] Bind has_unresolved_modal to evidence.valid in session_serializer.py
+- [x] Update final_lead_validator.py safety gates for unresolved modals
+- [x] Update teaser_driver.py for healthy benchmarks and dynamic outlines
+- [x] Run automated pytest verification
+- [x] Execute fresh live run on 7 stores using real Chromium
+- [x] Inspect fresh visual screenshots and compile final audit results
