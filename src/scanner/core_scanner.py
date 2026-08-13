@@ -1,6 +1,5 @@
 """
 src/scanner/core_scanner.py — Scanner Orchestration Engine
-
 Layer 2: Core Store Scanner Orchestrator
 """
 import logging
@@ -16,8 +15,6 @@ from src.scanner.models import (
     PDPScanResult,
     TransientScanContext,
 )
-
-
 from src.scanner.product_discovery import ProductDiscoveryEngine
 from src.scanner.variant_matrix import VariantMatrixScanner
 from src.scanner.page_validator import PageState, PageValidator
@@ -44,20 +41,18 @@ class IntegratedStoreScanner:
         """
         context = TransientScanContext(domain=store_record.domain)
         pdp_urls = self.discovery_engine.discover_pdp_urls(page, store_record.base_url)
-
         if not pdp_urls:
             logger.info("No candidate PDP URLs discovered for domain '%s'", store_record.domain)
             return context, page
 
-
         from src.scanner.navigation_helper import navigate_with_retry
+
         for url in pdp_urls:
             try:
                 response = navigate_with_retry(page, url, wait_until="domcontentloaded", timeout=15000)
-                
+
                 # CONTRACT-PDP-001: Centralized Safety Boundary & Page Type Classifier
                 validation = self.page_validator.validate_page(page, url, response=response)
-                
                 if validation.status != PageState.REAL_PRODUCT:
                     logger.warning(
                         "PDP Safety Gate BLOCKED non-product page '%s' (Status: %s, Reasons: %s). Skipping primary engines.",
@@ -189,7 +184,6 @@ class IntegratedStoreScanner:
                 variant_scanner = VariantMatrixScanner(page)
                 inspected_variants = variant_scanner.inspect_variants()
                 scanned_variant, scanned_variant_id, oos_det_result = variant_scanner.discover_oos_variant_state()
-
                 out_of_stock = (oos_det_result.state == DetectionState.TRUE)
                 variants_inspected = max(len(inspected_variants), 1)
                 variants_oos = 1 if out_of_stock else 0
@@ -221,11 +215,6 @@ class IntegratedStoreScanner:
                 opportunities: list[CommercialOpportunity] = []
 
                 # Engine 1: Revenue Leak (CONTRACT-BIS-001 / Step 7)
-                # REQUIRES:
-                # 1. Confirmed OOS (TRUE)
-                # 2. Verified Variant Identity (scanned_variant_id is non-empty)
-                # 3. Confirmed BIS Absence (FALSE)
-                # If OOS or BIS is UNKNOWN or variant_id is missing, 0 opportunities generated.
                 if (
                     oos_det_result.state == DetectionState.TRUE
                     and bool(scanned_variant_id)
@@ -242,10 +231,7 @@ class IntegratedStoreScanner:
                         )
                     )
 
-
                 # Engine 2: Missing Social Proof
-                # REQUIRES: Confirmed Review Absence (FALSE).
-                # CONTRACT-STATE-001 REQUIREMENT: If review_det_result.state == UNKNOWN -> 0 opportunities!
                 if review_det_result.state == DetectionState.FALSE:
                     opportunities.append(
                         CommercialOpportunity(
@@ -259,8 +245,6 @@ class IntegratedStoreScanner:
                     )
 
                 # Engine 3: Missing Upsell
-                # REQUIRES: Confirmed Upsell Absence (FALSE).
-                # CONTRACT-STATE-001 REQUIREMENT: If upsell_det_result.state == UNKNOWN -> 0 opportunities!
                 if upsell_det_result.state == DetectionState.FALSE:
                     opportunities.append(
                         CommercialOpportunity(
@@ -274,8 +258,6 @@ class IntegratedStoreScanner:
                     )
 
                 # Engine 4: Missing Sticky ATC
-                # REQUIRES: Confirmed Sticky ATC Absence (FALSE).
-                # CONTRACT-STATE-001 REQUIREMENT: If sticky_det_result.state == UNKNOWN -> 0 opportunities!
                 if sticky_det_result.state == DetectionState.FALSE:
                     opportunities.append(
                         CommercialOpportunity(
@@ -288,35 +270,65 @@ class IntegratedStoreScanner:
                         )
                     )
 
-
-
-
-
                 # 4. Immediate 1:1 Evidence Capture (CONTRACT-EVIDENCE-001)
                 pdp_png_bytes: bytes | None = None
                 pdp_boxes = None
-                
                 scroll_y_param = 0
                 if any(opp.opportunity_type == OpportunityType.MISSING_STICKY_ATC for opp in opportunities):
                     scroll_y_param = 1200
-                
+
                 actual_scroll_y = 0
+                actual_duration_ms = 0
+                actual_browser_version = ""
                 val_identity = True
                 val_buy_box = True
                 val_social = True
                 val_upsell = True
+                # P1.5: independent visual-proof flags (fail-closed defaults)
+                proven_identity = False
+                proven_buy_box = False
+                proven_social = False
+                proven_upsell = False
+                proven_sticky = False
+                proven_finding = False
+
                 try:
                     from src.evidence.evidence_collector import EvidenceCollector
                     evidence_collector = EvidenceCollector(page)
-                    pdp_png_bytes, _ = evidence_collector.capture_screenshot_bytes(scroll_y=scroll_y_param, opportunities=opportunities, product_title=product_title)
+                    # P1.5: capture REAL duration instead of discarding it
+                    pdp_png_bytes, actual_duration_ms = evidence_collector.capture_screenshot_bytes(
+                        scroll_y=scroll_y_param,
+                        opportunities=opportunities,
+                        product_title=product_title,
+                    )
                     actual_scroll_y = getattr(evidence_collector, "last_scroll_y", 0)
                     val_identity = getattr(evidence_collector, "product_identity_visible", True)
                     val_buy_box = getattr(evidence_collector, "buy_box_visible", True)
                     val_social = getattr(evidence_collector, "relevant_social_proof_region_visible", True)
                     val_upsell = getattr(evidence_collector, "relevant_upsell_region_visible", True)
+
+                    # P1.5: read post-validation proven flags from the collector (fail-closed)
+                    proven_identity = bool(getattr(evidence_collector, "product_identity_visible", False))
+                    proven_buy_box = bool(getattr(evidence_collector, "buy_box_visible", False))
+                    proven_social = bool(getattr(evidence_collector, "relevant_social_proof_region_visible", False))
+                    proven_upsell = bool(getattr(evidence_collector, "relevant_upsell_region_visible", False))
+                    proven_finding = bool(getattr(evidence_collector, "finding_visually_proven", False))
+
+                    # P1.5: REAL browser version (guarded)
+                    try:
+                        _browser = page.context.browser
+                        actual_browser_version = (getattr(_browser, "version", "") or "") if _browser else ""
+                    except Exception:
+                        actual_browser_version = ""
+
                     pdp_boxes = evidence_collector.capture_bounding_boxes()
                 except Exception as ev_exc:
                     logger.warning("Immediate evidence capture failed for PDP '%s': %s", url, ev_exc)
+                    # P1.5: no screenshot => nothing visible => fail-closed visibility flags
+                    val_identity = False
+                    val_buy_box = False
+                    val_social = False
+                    val_upsell = False
 
                 inspected_prices = [
                     v.price_usd
@@ -354,11 +366,18 @@ class IntegratedStoreScanner:
                     buy_box_visible=val_buy_box,
                     relevant_social_proof_region_visible=val_social,
                     relevant_upsell_region_visible=val_upsell,
+                    # P1.5: real capture metadata + visual-proof flags
+                    capture_duration_ms=actual_duration_ms,
+                    browser_version=actual_browser_version,
+                    product_identity_visually_proven=proven_identity,
+                    buy_box_visually_proven=proven_buy_box,
+                    social_proof_region_visually_proven=proven_social,
+                    upsell_region_visually_proven=proven_upsell,
+                    sticky_atc_region_visually_proven=proven_sticky,
+                    finding_visually_proven=proven_finding,
                 )
 
                 # CONTRACT-DEDUP-001: Store-scoped SKU Deduplication Boundary
-                # Deduplicate by canonical identity (domain, scanned_variant_id)
-                # If variant_id is non-empty and already present in context.pdp_results, skip appending duplicate record.
                 if scanned_variant_id:
                     existing_variant_ids = {p.scanned_variant_id for p in context.pdp_results if p.scanned_variant_id}
                     if scanned_variant_id in existing_variant_ids:
@@ -366,11 +385,6 @@ class IntegratedStoreScanner:
                         continue
 
                 context.pdp_results.append(pdp_result)
-
-
-
-
-
             except Exception as exc:
                 session_str = str(getattr(page, "session_id", "None"))
                 logger.error(
@@ -391,7 +405,4 @@ class IntegratedStoreScanner:
                     logger.warning("Could not recover page context for '%s': %s", url, recovery_exc)
                 continue
 
-
-
         return context, page
-
