@@ -186,13 +186,13 @@ class EvidenceCollector:
         js = "() => {\n" + JS_HELPERS + """
             const candidates = [];
 
-            // 1. ALL forms with purchase semantics (repaired: inputs declared, rendered gate)
+            // 1. ALL forms with purchase semantics (repaired: inputs declared, rendered gate, SVG-safe id)
             const forms = Array.from(document.querySelectorAll('form'));
             forms.forEach(f => {
                 try {
                     const txt = (f.textContent || '').toLowerCase();
                     const cls = (f.className || '').toLowerCase();
-                    const id_ = (f.id || '').toLowerCase();
+                    const id_ = (typeof f.id === 'string' ? f.id : '').toLowerCase();
                     const rect = f.getBoundingClientRect();
                     const inputs = Array.from(f.querySelectorAll('input'));
                     const rendered = rect.width > 20 && rect.height > 10;
@@ -211,7 +211,7 @@ class EvidenceCollector:
             divs.forEach(d => {
                 try {
                     const cls = (d.className || '').toLowerCase();
-                    const id_ = (d.id || '').toLowerCase();
+                    const id_ = (typeof d.id === 'string' ? d.id : '').toLowerCase();
                     const rect = d.getBoundingClientRect();
                     const visible = rect.width > 20 && rect.height > 50;
                     const is_header = /header|nav|drawer/.test(cls) || /header|nav|drawer/.test(id_);
@@ -279,7 +279,7 @@ class EvidenceCollector:
             result = el.evaluate("el => { " + JS_HELPERS + """
                 const txt = (el.textContent || '').toLowerCase();
                 const cls = (el.className || '').toLowerCase();
-                const id_ = (el.id || '').toLowerCase();
+                const id_ = (typeof el.id === 'string' ? el.id : '').toLowerCase();
                 const tag = el.tagName.toLowerCase();
 
                 let score = 0.0;
@@ -451,7 +451,7 @@ class EvidenceCollector:
                         const upsellPatterns = ['recommendation', 'cross-sell', 'upsell', 'related-product', 'bundle'];
                         for (const d of document.querySelectorAll('div, section')) {
                             const cls = (typeof d.className === 'string' ? d.className : '').toLowerCase();
-                            const id_ = (d.id || '').toLowerCase();
+                            const id_ = (typeof d.id === 'string' ? d.id : '').toLowerCase();
                             if (upsellPatterns.some(p => cls.includes(p) || id_.includes(p))) {
                                 if (d.querySelectorAll('a, img, button').length > 0) { upsellEl = d; break; }
                             }
@@ -582,11 +582,12 @@ class EvidenceCollector:
             scroll_result = self.page.evaluate("() => { " + JS_HELPERS + """
                 const candidates = [];
 
+                // FIX: SVG-safe id extraction
                 const forms = Array.from(document.querySelectorAll('form'));
                 forms.forEach(f => {
                     const txt = (f.textContent || '').toLowerCase();
                     const cls = (f.className || '').toLowerCase();
-                    const id_ = (f.id || '').toLowerCase();
+                    const id_ = (typeof f.id === 'string' ? f.id : '').toLowerCase();
                     const rect = f.getBoundingClientRect();
                     const visible = rect.width > 20 && rect.height > 50;
                     const is_purchase = PURCHASE_RE.test(txt) || /product-form/.test(cls) || /add-to-cart/.test(id_);
@@ -617,7 +618,7 @@ class EvidenceCollector:
                     try {
                         const txt = (el.textContent || '').toLowerCase();
                         const cls = (el.className || '').toLowerCase();
-                        const id_ = (el.id || '').toLowerCase();
+                        const id_ = (typeof el.id === 'string' ? el.id : '').toLowerCase();
                         const tag = el.tagName.toLowerCase();
                         let score = 0;
 
@@ -682,7 +683,7 @@ class EvidenceCollector:
                 for (const d of divs) {
                     try {
                         const cls = (typeof d.className === 'string' ? d.className : '').toLowerCase();
-                        const id_ = (d.id || '').toLowerCase();
+                        const id_ = (typeof d.id === 'string' ? d.id : '').toLowerCase();
                         if (upsellPatterns.some(p => cls.includes(p) || id_.includes(p))) {
                             const rect = d.getBoundingClientRect();
                             if (rect.width > 50 && rect.height > 50) {
@@ -837,7 +838,7 @@ class EvidenceCollector:
                     for (const d of document.querySelectorAll('div, section')) {
                         try {
                             const cls = (typeof d.className === 'string' ? d.className : '').toLowerCase();
-                            const id_ = (d.id || '').toLowerCase();
+                            const id_ = (typeof d.id === 'string' ? d.id : '').toLowerCase();
                             if (upsellPatterns.some(p => cls.includes(p) || id_.includes(p))) {
                                 if (visibleAndClear(d) && d.querySelectorAll('a[href*="/products/"], img').length > 0) { upsellVisible = true; break; }
                             }
