@@ -7,6 +7,35 @@ from playwright.sync_api import Page, Response
 
 logger = logging.getLogger(__name__)
 
+# P3 — Stealth anti-detection (optional dependency)
+_STEALTH_AVAILABLE = False
+try:
+    from playwright_stealth import stealth_sync
+    _STEALTH_AVAILABLE = True
+except ImportError:
+    stealth_sync = None
+    logger.info("playwright-stealth not installed; anti-detection disabled. Install with: pip install playwright-stealth")
+
+
+def apply_stealth_if_available(page: Page) -> bool:
+    """
+    Apply playwright-stealth anti-detection scripts to a Page.
+    Returns True if stealth was applied, False otherwise.
+    Safe to call multiple times — uses page._stealth_applied flag.
+    """
+    if not _STEALTH_AVAILABLE or stealth_sync is None:
+        return False
+    if getattr(page, "_stealth_applied", False):
+        return True
+    try:
+        stealth_sync(page)
+        page._stealth_applied = True
+        logger.debug("Applied playwright-stealth anti-detection to page")
+        return True
+    except Exception as exc:
+        logger.warning("Failed to apply playwright-stealth: %s", exc)
+        return False
+
 
 def is_retryable_error(exc: Exception) -> bool:
     """
@@ -43,7 +72,11 @@ def navigate_with_retry(
     """
     Navigates a Playwright Page to a URL with a retry mechanism.
     Enforces retryable vs non-retryable boundaries with logging.
+    P3: Applies stealth anti-detection before first navigation.
     """
+    # P3 — Apply stealth before first navigation
+    apply_stealth_if_available(page)
+
     for attempt in range(1, max_attempts + 1):
         try:
             logger.info("Navigation attempt=%d/%d url=%s", attempt, max_attempts, url)
@@ -56,7 +89,9 @@ def navigate_with_retry(
 
             if attempt > 1:
                 logger.info("SUCCESS attempt=%d/%d url=%s", attempt, max_attempts, url)
+
             return response
+
         except Exception as exc:
             # Distinguish retryable vs non-retryable errors
             if not is_retryable_error(exc):
@@ -68,8 +103,11 @@ def navigate_with_retry(
                 raise exc
 
             logger.warning("RETRY attempt=%d/%d url=%s error=%s: %s", attempt, max_attempts, url, type(exc).__name__, exc)
-            # Short backoff
-            time.sleep(attempt * 0.5)
+
+            # P3 — Add jitter delay between retries (anti-detection)
+            import random
+            jitter = random.uniform(0.5, 1.5)
+            time.sleep((attempt * 0.5) + jitter)
 
     return None
 
@@ -184,7 +222,7 @@ def dismiss_overlays_and_popups(page: Page) -> None:
                 const style = window.getComputedStyle(el);
                 const isVisible = el.offsetHeight > 200 && el.offsetWidth > 200 && style.display !== 'none' && style.visibility !== 'hidden' && parseFloat(style.opacity || '1') > 0;
                 if (!isVisible) return false;
-                
+
                 // Check if it is a modal/popup/cookie banner container
                 const idOrClass = ((el.id || '') + ' ' + (el.className || '')).toLowerCase();
                 const isModal = idOrClass.includes('modal') || idOrClass.includes('popup') || idOrClass.includes('cookie') || idOrClass.includes('banner') || el.getAttribute('role') === 'dialog' || el.getAttribute('aria-modal') === 'true';
@@ -200,4 +238,3 @@ def dismiss_overlays_and_popups(page: Page) -> None:
             logger.warning("Unresolved modal detected on the page after dismissal attempts.")
     except Exception:
         page.has_unresolved_modal = False
-
