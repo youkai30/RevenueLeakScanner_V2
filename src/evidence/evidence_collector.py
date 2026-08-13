@@ -2,14 +2,11 @@
 src/evidence/evidence_collector.py — Playwright Screenshot & Bounding Box Collector
 Layer 3: Evidence Capture Engine
 
-P2 — GENERIC BUY BOX LOCATOR (unified definitions):
-- ONE JS helpers block (isHeaderOrDrawer / isInViewport / getElementText / CTA keywords).
-- ONE viewport tolerance source of truth (VIEWPORT_TOLERANCE).
-- Review detection: structural/schema first; platform classes are OPTIONAL adapters only.
-- Diagnostics: candidates count, rejection reasons, best rejected, chosen, scroll target.
-- BoundingBoxMap fully populated (cta / notify / reviews / upsell / sticky_atc).
-- Occlusion check (elementFromPoint) in visual validation.
-NO store-specific selectors. NO domain branches. NO threshold/weight changes.
+P0: scroll eligibility separated from confidence; forms branch repaired;
+    no early return on missing buy_box; smooth-scroll stabilization.
+P2: unified JS helpers; SVG-safe id extraction; structural review detection;
+    diagnostics; full BoundingBoxMap population; occlusion check (fail-closed).
+NO store-specific selectors. NO threshold/weight changes.
 """
 import json
 import logging
@@ -179,7 +176,7 @@ class EvidenceCollector:
                 pass
 
     # ─────────────────────────────────────────────────────────────
-    # P2 — Candidate generation (unified helpers, repaired forms branch)
+    # P2 — Candidate generation (unified helpers, repaired forms branch, SVG-safe)
     # ─────────────────────────────────────────────────────────────
     def _candidate_containers(self) -> list[dict]:
         """Generate candidates from DOM structure using generic signals, NOT CSS selectors."""
@@ -191,7 +188,7 @@ class EvidenceCollector:
             forms.forEach(f => {
                 try {
                     const txt = (f.textContent || '').toLowerCase();
-                    const cls = (f.className || '').toLowerCase();
+                    const cls = (typeof f.className === 'string' ? f.className : '').toLowerCase();
                     const id_ = (typeof f.id === 'string' ? f.id : '').toLowerCase();
                     const rect = f.getBoundingClientRect();
                     const inputs = Array.from(f.querySelectorAll('input'));
@@ -210,7 +207,7 @@ class EvidenceCollector:
             const divs = Array.from(document.querySelectorAll('div'));
             divs.forEach(d => {
                 try {
-                    const cls = (d.className || '').toLowerCase();
+                    const cls = (typeof d.className === 'string' ? d.className : '').toLowerCase();
                     const id_ = (typeof d.id === 'string' ? d.id : '').toLowerCase();
                     const rect = d.getBoundingClientRect();
                     const visible = rect.width > 20 && rect.height > 50;
@@ -278,7 +275,7 @@ class EvidenceCollector:
         try:
             result = el.evaluate("el => { " + JS_HELPERS + """
                 const txt = (el.textContent || '').toLowerCase();
-                const cls = (el.className || '').toLowerCase();
+                const cls = (typeof el.className === 'string' ? el.className : '').toLowerCase();
                 const id_ = (typeof el.id === 'string' ? el.id : '').toLowerCase();
                 const tag = el.tagName.toLowerCase();
 
@@ -415,7 +412,7 @@ class EvidenceCollector:
                 boxes["buy_box"] = BoundingBox(**{k: float(v) for k, v in best_bbox.items()})
                 self.buy_box_confidence = best_score
 
-                # P2 — auxiliary boxes inside chosen candidate
+                # P2 — auxiliary boxes inside chosen candidate (cta/notify/reviews)
                 try:
                     aux_chosen = best_el.evaluate("el => { " + JS_HELPERS + """
                         let ctaEl = null;
@@ -474,12 +471,6 @@ class EvidenceCollector:
 
             # Expected social proof region (structural estimate; unchanged)
             if best_bbox and best_signals.confidence >= BUY_BOX_CONFIDENCE_THRESHOLD:
-                try:
-                    scroll_x = self.page.evaluate("window.scrollX || 0") or 0
-                    scroll_y_val = self.page.evaluate("window.scrollY || 0") or 0
-                except Exception:
-                    scroll_x = 0
-                    scroll_y_val = 0
                 expected_region = {
                     "x": float(best_bbox["x"]),
                     "y": float(best_bbox["y"] + best_bbox["height"]),
@@ -488,7 +479,6 @@ class EvidenceCollector:
                 }
                 boxes["expected_social_proof_region"] = BoundingBox(**expected_region)
                 self.buy_box_reason = best_signals.reason
-                _ = scroll_x, scroll_y_val  # kept for API clarity
 
             self.buy_box_signals = best_signals if best_bbox else None
 
@@ -507,7 +497,8 @@ class EvidenceCollector:
         opportunities: list[Any] | None = None,
         product_title: str = ""
     ) -> tuple[bytes, int]:
-        """Scrolls per opportunity type, suppresses popups, captures viewport PNG."""
+        """Scrolls per opportunity type, suppresses popups, captures viewport PNG.
+        Returns (png_bytes, duration_ms)."""
         if getattr(self.page, "is_closed", lambda: False)():
             raise RuntimeError("Cannot capture screenshot on closed Page execution context")
 
@@ -577,16 +568,15 @@ class EvidenceCollector:
     # ─────────────────────────────────────────────────────────────
     def _scroll_for_social_proof(self, bmap: BoundingBoxMap, scroll_y: int) -> None:
         """Scroll viewport to include buy box AND expected social proof region."""
-        # NOTE (P0): do NOT early-return when bmap.buy_box is None — inline detection proceeds.
+        # P0: do NOT early-return when bmap.buy_box is None — inline detection proceeds.
         try:
             scroll_result = self.page.evaluate("() => { " + JS_HELPERS + """
                 const candidates = [];
 
-                // FIX: SVG-safe id extraction
                 const forms = Array.from(document.querySelectorAll('form'));
                 forms.forEach(f => {
                     const txt = (f.textContent || '').toLowerCase();
-                    const cls = (f.className || '').toLowerCase();
+                    const cls = (typeof f.className === 'string' ? f.className : '').toLowerCase();
                     const id_ = (typeof f.id === 'string' ? f.id : '').toLowerCase();
                     const rect = f.getBoundingClientRect();
                     const visible = rect.width > 20 && rect.height > 50;
@@ -617,7 +607,7 @@ class EvidenceCollector:
                 candidates.forEach(el => {
                     try {
                         const txt = (el.textContent || '').toLowerCase();
-                        const cls = (el.className || '').toLowerCase();
+                        const cls = (typeof el.className === 'string' ? el.className : '').toLowerCase();
                         const id_ = (typeof el.id === 'string' ? el.id : '').toLowerCase();
                         const tag = el.tagName.toLowerCase();
                         let score = 0;
@@ -780,7 +770,7 @@ class EvidenceCollector:
         return png_bytes
 
     # ─────────────────────────────────────────────────────────────
-    # P2 — validation with occlusion check; proven flags unchanged (P1.5 contract)
+    # P2 — validation with occlusion check; proven flags (P1.5 contract)
     # ─────────────────────────────────────────────────────────────
     def _validate_from_screenshot(self, png_bytes: bytes, bmap: BoundingBoxMap, opp_type: str | None) -> None:
         """Independently validate what is ACTUALLY visible (and not occluded) in the viewport."""
