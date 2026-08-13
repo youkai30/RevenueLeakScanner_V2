@@ -1,6 +1,9 @@
 """
 src/evidence/session_serializer.py — Evidence & Session Bundle Serializer Engine
 Layer 3: Evidence Builder & Session Storage Compiler
+
+P1.5: REAL capture metadata (no fabrication); fail-closed visibility flags;
+      opportunity-aware valid formula; proven flags wired; FALLBACK removed.
 """
 import logging
 from datetime import datetime, timezone
@@ -79,21 +82,27 @@ class EvidenceBuilder:
         parsed_url = urlparse(pdp_result.product_url)
         relative_path = f"{parsed_url.netloc}/{session_str}/{png_filename}"
 
+        # ─────────────────────────────────────────────────────────────
         # P1.5 — REAL capture metadata (clamped, never fabricated)
+        # ─────────────────────────────────────────────────────────────
         real_duration_ms = int(getattr(pdp_result, "capture_duration_ms", 0) or 0)
         capture_duration_ms = max(1, real_duration_ms)
         real_browser_version = str(getattr(pdp_result, "browser_version", "") or "")
         browser_version = real_browser_version or browser_version
         scroll_y = int(getattr(pdp_result, "scroll_y", 0) or 0)
 
+        # ─────────────────────────────────────────────────────────────
         # P1.5 — Visibility flags (fail-closed defaults)
+        # ─────────────────────────────────────────────────────────────
         has_unresolved_modal = bool(getattr(pdp_result, "has_unresolved_modal", False))
         product_identity_visible = bool(getattr(pdp_result, "product_identity_visible", False))
         buy_box_visible = bool(getattr(pdp_result, "buy_box_visible", False))
         relevant_social_proof_region_visible = bool(getattr(pdp_result, "relevant_social_proof_region_visible", False))
         relevant_upsell_region_visible = bool(getattr(pdp_result, "relevant_upsell_region_visible", False))
 
+        # ─────────────────────────────────────────────────────────────
         # P1.5 — Opportunity-aware valid formula
+        # ─────────────────────────────────────────────────────────────
         primary_opp = self._primary_opportunity_type(pdp_result)
 
         require_social = primary_opp in ("MISSING_SOCIAL_PROOF", "REVENUE_LEAK") or primary_opp is None
@@ -120,7 +129,9 @@ class EvidenceBuilder:
             failures.append("Relevant upsell region not visible in screenshot")
         validation_reason = failures[0] if failures else reason
 
+        # ─────────────────────────────────────────────────────────────
         # P1.5 — Independent visual-proof flags (fail-closed)
+        # ─────────────────────────────────────────────────────────────
         finding_visually_proven = bool(getattr(pdp_result, "finding_visually_proven", False))
         product_identity_visually_proven = bool(getattr(pdp_result, "product_identity_visually_proven", False))
         buy_box_visually_proven = bool(getattr(pdp_result, "buy_box_visually_proven", False))
@@ -214,7 +225,7 @@ class EvidenceBuilder:
                 findings_list.append(finding_obj)
                 all_pngs[finding_obj.evidence.image_file] = png_bytes
         elif transient_context.pdp_results:
-            # P1.5 — Legacy fallback REMOVED
+            # P1.5 — Legacy fallback REMOVED: fabricating dummy PNG evidence is forbidden.
             raise InvalidBundleException(
                 "No verified PNG evidence provided; legacy fallback path removed to prevent fabricated evidence."
             )
@@ -222,6 +233,7 @@ class EvidenceBuilder:
         if not primary_png_bytes:
             raise InvalidBundleException("At least one valid evidence PNG stream is required for session bundle compilation.")
 
+        # Convert Findings list and CommercialImpact DTO to dictionary payload for checksum sealing
         findings_json_dicts = [f.model_dump(mode="json") for f in findings_list]
         commercial_json_dict = commercial_impact.model_dump(mode="json")
 
@@ -238,6 +250,7 @@ class EvidenceBuilder:
             "contact_info": contact_info_dict,
         }
 
+        # Persist atomically via Write-Once SessionStorage
         import inspect
         sig = inspect.signature(self.storage.save_new_bundle)
         if "all_pngs" in sig.parameters:
