@@ -47,8 +47,6 @@ def scan_single_store_task(item):
         status = _safe_str(res_dict.get("status"), "UNKNOWN")
         session_id = _safe_str(res_dict.get("session_id"), "N/A")
         session_json_path = _safe_str(res_dict.get("session_json_path"), "N/A")
-
-        # Financial fields — may be None for failed/blocked scans
         est_loss = _safe_float(res_dict.get("est_monthly_loss_usd"), 0.0)
         lead_priority = _safe_str(res_dict.get("lead_priority"), "N/A")
 
