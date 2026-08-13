@@ -58,8 +58,6 @@ class IntegratedStoreScanner:
                         "PDP Safety Gate BLOCKED non-product page '%s' (Status: %s, Reasons: %s). Skipping primary engines.",
                         url, validation.status.value, "; ".join(validation.reasons)
                     )
-                    # Non-REAL_PRODUCT pages MUST NOT enter primary engines (CONTRACT-PDP-001)
-                    # Record diagnostic non-commercial result with 0 opportunities
                     pdp_result = PDPScanResult(
                         product_name=validation.product_title or (page.title() or store_record.domain).split("|")[0].strip(),
                         product_url=url,
@@ -68,14 +66,14 @@ class IntegratedStoreScanner:
                         notify_button_detected=False,
                         sold_out_detected=False,
                         page_state=validation.status,
-                        opportunities=[],  # 0 Commercial Opportunities (Strict CONTRACT-PDP-001 enforcement)
+                        opportunities=[],
                     )
                     context.pdp_results.append(pdp_result)
                     continue
 
                 product_title = validation.product_title or (page.title() or store_record.domain).split("|")[0].strip()
 
-                # Dismiss overlays, cookie banners, and popups before running detectors and screenshots
+                # Dismiss overlays
                 try:
                     from src.scanner.navigation_helper import dismiss_overlays_and_popups
                     dismiss_overlays_and_popups(page)
@@ -88,18 +86,11 @@ class IntegratedStoreScanner:
                         from urllib.parse import urlparse, urljoin
                         contacts = page.evaluate("""() => {
                             let result = {
-                                email: null,
-                                email_source: "NOT_FOUND",
-                                phone: null,
-                                phone_source: "NOT_FOUND",
-                                contact_page: null,
-                                contact_page_source: "NOT_FOUND",
-                                instagram_url: null,
-                                facebook_url: null,
-                                linkedin_url: null,
-                                tiktok_url: null,
-                                youtube_url: null,
-                                x_url: null
+                                email: null, email_source: "NOT_FOUND",
+                                phone: null, phone_source: "NOT_FOUND",
+                                contact_page: null, contact_page_source: "NOT_FOUND",
+                                instagram_url: null, facebook_url: null, linkedin_url: null,
+                                tiktok_url: null, youtube_url: null, x_url: null
                             };
                             let mailtoEl = document.querySelector('a[href^="mailto:"]');
                             if (mailtoEl) {
@@ -124,11 +115,8 @@ class IntegratedStoreScanner:
                                 let href = link.getAttribute('href') || '';
                                 let hrefLower = href.toLowerCase();
                                 let text = (link.textContent || '').toLowerCase();
-                                if (
-                                    (hrefLower.includes('/contact') || text.includes('contact us') || text === 'contact') && 
-                                    !hrefLower.includes('mailto:') && 
-                                    !hrefLower.includes('tel:')
-                                ) {
+                                if ((hrefLower.includes('/contact') || text.includes('contact us') || text === 'contact') && 
+                                    !hrefLower.includes('mailto:') && !hrefLower.includes('tel:')) {
                                     result.contact_page = href;
                                     result.contact_page_source = "FOOTER_LINK";
                                     break;
@@ -137,19 +125,12 @@ class IntegratedStoreScanner:
                             for (let link of links) {
                                 let href = link.getAttribute('href') || '';
                                 let hrefLower = href.toLowerCase();
-                                if (hrefLower.includes('instagram.com/')) {
-                                    result.instagram_url = href;
-                                } else if (hrefLower.includes('facebook.com/')) {
-                                    result.facebook_url = href;
-                                } else if (hrefLower.includes('linkedin.com/')) {
-                                    result.linkedin_url = href;
-                                } else if (hrefLower.includes('tiktok.com/')) {
-                                    result.tiktok_url = href;
-                                } else if (hrefLower.includes('youtube.com/')) {
-                                    result.youtube_url = href;
-                                } else if (hrefLower.includes('x.com/') || hrefLower.includes('twitter.com/')) {
-                                    result.x_url = href;
-                                }
+                                if (hrefLower.includes('instagram.com/')) result.instagram_url = href;
+                                else if (hrefLower.includes('facebook.com/')) result.facebook_url = href;
+                                else if (hrefLower.includes('linkedin.com/')) result.linkedin_url = href;
+                                else if (hrefLower.includes('tiktok.com/')) result.tiktok_url = href;
+                                else if (hrefLower.includes('youtube.com/')) result.youtube_url = href;
+                                else if (hrefLower.includes('x.com/') || hrefLower.includes('twitter.com/')) result.x_url = href;
                             }
                             return result;
                         }""")
@@ -163,24 +144,18 @@ class IntegratedStoreScanner:
                             for k in ["instagram_url", "facebook_url", "linkedin_url", "tiktok_url", "youtube_url", "x_url"]:
                                 if contacts.get(k):
                                     platform_name = k.replace("_url", "")
-                                    if platform_name == "instagram":
-                                        platform_name = "instagram.com"
-                                    elif platform_name == "facebook":
-                                        platform_name = "facebook.com"
-                                    elif platform_name == "linkedin":
-                                        platform_name = "linkedin.com"
-                                    elif platform_name == "tiktok":
-                                        platform_name = "tiktok.com"
-                                    elif platform_name == "youtube":
-                                        platform_name = "youtube.com"
-                                    elif platform_name == "x":
-                                        platform_name = "x.com"
+                                    if platform_name == "instagram": platform_name = "instagram.com"
+                                    elif platform_name == "facebook": platform_name = "facebook.com"
+                                    elif platform_name == "linkedin": platform_name = "linkedin.com"
+                                    elif platform_name == "tiktok": platform_name = "tiktok.com"
+                                    elif platform_name == "youtube": platform_name = "youtube.com"
+                                    elif platform_name == "x": platform_name = "x.com"
                                     contacts[k] = enricher.sanitize_social_url(platform_name, contacts[k])
                             context.metadata["contact_info"] = contacts
                     except Exception as ev_exc:
                         logger.warning("Failed DOM extraction of contacts: %s", ev_exc)
 
-                # 1. Variant Inspection (CONTRACT-VARIANT-001)
+                # 1. Variant Inspection
                 variant_scanner = VariantMatrixScanner(page)
                 inspected_variants = variant_scanner.inspect_variants()
                 scanned_variant, scanned_variant_id, oos_det_result = variant_scanner.discover_oos_variant_state()
@@ -192,13 +167,13 @@ class IntegratedStoreScanner:
                 if variant_scanner.is_extraction_uncertain(inspected_variants):
                     validation_status = PageState.PARTIALLY_INSPECTED
 
-                # 2. BIS Modal Inspection (3-State CONTRACT-STATE-001)
+                # 2. BIS Modal Inspection
                 bis_checker = BISChecker(page)
                 bis_det_result = bis_checker.check_notify_state(out_of_stock=out_of_stock)
                 notify_detected = (bis_det_result.state == DetectionState.TRUE)
                 _, sold_out_detected = bis_checker.check_notify_mechanism()
 
-                # 3. CRO Stack Detection (3-State CONTRACT-STATE-001)
+                # 3. CRO Stack Detection
                 cro_detector = CROStackDetector(page)
                 review_det_result = cro_detector.detect_review_state()
                 review_widget_detected = (review_det_result.state == DetectionState.TRUE)
@@ -211,80 +186,64 @@ class IntegratedStoreScanner:
                 sticky_det_result = cro_detector.detect_sticky_atc_state()
                 sticky_atc_detected = (sticky_det_result.state == DetectionState.TRUE)
 
-                # Independent Commercial Opportunity Evaluation Protocol (CONTRACT-STATE-001)
+                # Independent Commercial Opportunity Evaluation Protocol
                 opportunities: list[CommercialOpportunity] = []
 
-                # Engine 1: Revenue Leak (CONTRACT-BIS-001 / Step 7)
-                if (
-                    oos_det_result.state == DetectionState.TRUE
-                    and bool(scanned_variant_id)
-                    and bis_det_result.state == DetectionState.FALSE
-                ):
-                    opportunities.append(
-                        CommercialOpportunity(
-                            opportunity_type=OpportunityType.REVENUE_LEAK,
-                            commercial_problem_summary=f"Out-of-Stock variant '{scanned_variant}' (ID: {scanned_variant_id}) has no Back-in-Stock capture modal",
-                            sellable_service_angle="Back-In-Stock Restock Capture Flow",
-                            is_valid_opportunity=True,
-                            evidence_status=EvidenceStatus.VERIFIED,
-                            inspected_surfaces=["buy_box", "variant_matrix", "bis_modal"],
-                        )
-                    )
+                if (oos_det_result.state == DetectionState.TRUE and bool(scanned_variant_id) and bis_det_result.state == DetectionState.FALSE):
+                    opportunities.append(CommercialOpportunity(
+                        opportunity_type=OpportunityType.REVENUE_LEAK,
+                        commercial_problem_summary=f"Out-of-Stock variant '{scanned_variant}' (ID: {scanned_variant_id}) has no Back-in-Stock capture modal",
+                        sellable_service_angle="Back-In-Stock Restock Capture Flow",
+                        is_valid_opportunity=True,
+                        evidence_status=EvidenceStatus.VERIFIED,
+                        inspected_surfaces=["buy_box", "variant_matrix", "bis_modal"],
+                    ))
 
-                # Engine 2: Missing Social Proof
                 if review_det_result.state == DetectionState.FALSE:
-                    opportunities.append(
-                        CommercialOpportunity(
-                            opportunity_type=OpportunityType.MISSING_SOCIAL_PROOF,
-                            commercial_problem_summary="Buy Box fold lacks immediate customer review rating badges",
-                            sellable_service_angle="Social Proof & Review Automation Setup",
-                            is_valid_opportunity=True,
-                            evidence_status=EvidenceStatus.VERIFIED,
-                            inspected_surfaces=["buy_box_stars", "review_summary_badge"],
-                        )
-                    )
+                    opportunities.append(CommercialOpportunity(
+                        opportunity_type=OpportunityType.MISSING_SOCIAL_PROOF,
+                        commercial_problem_summary="Buy Box fold lacks immediate customer review rating badges",
+                        sellable_service_angle="Social Proof & Review Automation Setup",
+                        is_valid_opportunity=True,
+                        evidence_status=EvidenceStatus.VERIFIED,
+                        inspected_surfaces=["buy_box_stars", "review_summary_badge"],
+                    ))
 
-                # Engine 3: Missing Upsell
                 if upsell_det_result.state == DetectionState.FALSE:
-                    opportunities.append(
-                        CommercialOpportunity(
-                            opportunity_type=OpportunityType.MISSING_UPSELL,
-                            commercial_problem_summary="Product Detail Page lacks Cross-Sell / Upsell AOV expansion recommendations",
-                            sellable_service_angle="Cart Drawer & Cross-Sell CRO Optimization",
-                            is_valid_opportunity=True,
-                            evidence_status=EvidenceStatus.PARTIALLY_VERIFIED,
-                            inspected_surfaces=["pdp_buy_box", "recommendation_modules", "cart_drawer_container"],
-                        )
-                    )
+                    opportunities.append(CommercialOpportunity(
+                        opportunity_type=OpportunityType.MISSING_UPSELL,
+                        commercial_problem_summary="Product Detail Page lacks Cross-Sell / Upsell AOV expansion recommendations",
+                        sellable_service_angle="Cart Drawer & Cross-Sell CRO Optimization",
+                        is_valid_opportunity=True,
+                        evidence_status=EvidenceStatus.PARTIALLY_VERIFIED,
+                        inspected_surfaces=["pdp_buy_box", "recommendation_modules", "cart_drawer_container"],
+                    ))
 
-                # Engine 4: Missing Sticky ATC
                 if sticky_det_result.state == DetectionState.FALSE:
-                    opportunities.append(
-                        CommercialOpportunity(
-                            opportunity_type=OpportunityType.MISSING_STICKY_ATC,
-                            commercial_problem_summary="Scrollable mobile Product Detail Page lacks persistent Sticky Add-to-Cart UX",
-                            sellable_service_angle="Mobile Sticky ATC & Sticky Nav UX Optimization",
-                            is_valid_opportunity=True,
-                            evidence_status=EvidenceStatus.VERIFIED,
-                            inspected_surfaces=["mobile_viewport_375x667", "page_scroll_context", "lower_viewport_fold"],
-                        )
-                    )
+                    opportunities.append(CommercialOpportunity(
+                        opportunity_type=OpportunityType.MISSING_STICKY_ATC,
+                        commercial_problem_summary="Scrollable mobile Product Detail Page lacks persistent Sticky Add-to-Cart UX",
+                        sellable_service_angle="Mobile Sticky ATC & Sticky Nav UX Optimization",
+                        is_valid_opportunity=True,
+                        evidence_status=EvidenceStatus.VERIFIED,
+                        inspected_surfaces=["mobile_viewport_375x667", "page_scroll_context", "lower_viewport_fold"],
+                    ))
 
-                # 4. Immediate 1:1 Evidence Capture (CONTRACT-EVIDENCE-001)
+                # 4. Immediate 1:1 Evidence Capture
                 pdp_png_bytes: bytes | None = None
                 pdp_boxes = None
                 scroll_y_param = 0
                 if any(opp.opportunity_type == OpportunityType.MISSING_STICKY_ATC for opp in opportunities):
                     scroll_y_param = 1200
 
+                # P1.5: Initialize all visual flags to False (fail-closed)
                 actual_scroll_y = 0
                 actual_duration_ms = 0
                 actual_browser_version = ""
-                val_identity = True
-                val_buy_box = True
-                val_social = True
-                val_upsell = True
-                # P1.5: independent visual-proof flags (fail-closed defaults)
+                val_identity = False
+                val_buy_box = False
+                val_social = False
+                val_upsell = False
                 proven_identity = False
                 proven_buy_box = False
                 proven_social = False
@@ -295,40 +254,39 @@ class IntegratedStoreScanner:
                 try:
                     from src.evidence.evidence_collector import EvidenceCollector
                     evidence_collector = EvidenceCollector(page)
-                    # P1.5: capture REAL duration instead of discarding it
+                    
+                    # P1.5: capture REAL duration and metadata
                     pdp_png_bytes, actual_duration_ms = evidence_collector.capture_screenshot_bytes(
                         scroll_y=scroll_y_param,
                         opportunities=opportunities,
                         product_title=product_title,
                     )
                     actual_scroll_y = getattr(evidence_collector, "last_scroll_y", 0)
-                    val_identity = getattr(evidence_collector, "product_identity_visible", True)
-                    val_buy_box = getattr(evidence_collector, "buy_box_visible", True)
-                    val_social = getattr(evidence_collector, "relevant_social_proof_region_visible", True)
-                    val_upsell = getattr(evidence_collector, "relevant_upsell_region_visible", True)
-
-                    # P1.5: read post-validation proven flags from the collector (fail-closed)
-                    proven_identity = bool(getattr(evidence_collector, "product_identity_visible", False))
-                    proven_buy_box = bool(getattr(evidence_collector, "buy_box_visible", False))
-                    proven_social = bool(getattr(evidence_collector, "relevant_social_proof_region_visible", False))
-                    proven_upsell = bool(getattr(evidence_collector, "relevant_upsell_region_visible", False))
+                    
+                    # P1.5: read visibility flags (fail-closed: default False)
+                    val_identity = bool(getattr(evidence_collector, "product_identity_visible", False))
+                    val_buy_box = bool(getattr(evidence_collector, "buy_box_visible", False))
+                    val_social = bool(getattr(evidence_collector, "relevant_social_proof_region_visible", False))
+                    val_upsell = bool(getattr(evidence_collector, "relevant_upsell_region_visible", False))
+                    
+                    # P1.5: read proven flags
+                    proven_identity = val_identity
+                    proven_buy_box = val_buy_box
+                    proven_social = val_social
+                    proven_upsell = val_upsell
                     proven_finding = bool(getattr(evidence_collector, "finding_visually_proven", False))
-
-                    # P1.5: REAL browser version (guarded)
+                    
+                    # P1.5: REAL browser version
                     try:
                         _browser = page.context.browser
                         actual_browser_version = (getattr(_browser, "version", "") or "") if _browser else ""
                     except Exception:
                         actual_browser_version = ""
-
+                    
                     pdp_boxes = evidence_collector.capture_bounding_boxes()
                 except Exception as ev_exc:
                     logger.warning("Immediate evidence capture failed for PDP '%s': %s", url, ev_exc)
-                    # P1.5: no screenshot => nothing visible => fail-closed visibility flags
-                    val_identity = False
-                    val_buy_box = False
-                    val_social = False
-                    val_upsell = False
+                    # P1.5: no screenshot => fail-closed (all flags stay False)
 
                 inspected_prices = [
                     v.price_usd
@@ -362,13 +320,15 @@ class IntegratedStoreScanner:
                     upsell_detection_state=upsell_det_result.state.value,
                     sticky_atc_detection_state=sticky_det_result.state.value,
                     has_unresolved_modal=getattr(page, "has_unresolved_modal", False),
+                    # P1.5: real visibility flags (fail-closed)
                     product_identity_visible=val_identity,
                     buy_box_visible=val_buy_box,
                     relevant_social_proof_region_visible=val_social,
                     relevant_upsell_region_visible=val_upsell,
-                    # P1.5: real capture metadata + visual-proof flags
+                    # P1.5: real metadata
                     capture_duration_ms=actual_duration_ms,
                     browser_version=actual_browser_version,
+                    # P1.5: proven flags
                     product_identity_visually_proven=proven_identity,
                     buy_box_visually_proven=proven_buy_box,
                     social_proof_region_visually_proven=proven_social,
@@ -377,7 +337,7 @@ class IntegratedStoreScanner:
                     finding_visually_proven=proven_finding,
                 )
 
-                # CONTRACT-DEDUP-001: Store-scoped SKU Deduplication Boundary
+                # CONTRACT-DEDUP-001: Store-scoped SKU Deduplication
                 if scanned_variant_id:
                     existing_variant_ids = {p.scanned_variant_id for p in context.pdp_results if p.scanned_variant_id}
                     if scanned_variant_id in existing_variant_ids:
@@ -391,14 +351,12 @@ class IntegratedStoreScanner:
                     "ERROR | session=%s | component=core_scanner | url=%s | operation=scan_pdp | error=%s | message=%s",
                     session_str, url, type(exc).__name__, str(exc)
                 )
-                # Safely discard damaged execution context and open a clean Page
                 try:
                     ctx = page.context
                     try:
                         page.close()
                     except Exception:
                         pass
-                    # Keep session_id on the new page
                     page = ctx.new_page()
                     page.session_id = session_str
                 except Exception as recovery_exc:
