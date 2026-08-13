@@ -1,6 +1,5 @@
 """
 src/evidence/evidence_collector.py — Playwright Screenshot & Bounding Box Collector
-
 Layer 3: Evidence Capture Engine
 
 GENERIC BUY BOX LOCATOR: Uses semantic signal scoring, NOT CSS selectors.
@@ -40,7 +39,7 @@ CTA_KEYWORDS = [
     "add to cart", "add to bag", "buy now", "select size", "select a size",
     "add to basket", "sold out", "checkout",
     "ajouter au panier", "añadir al carrito", "in den warenkorb",
-    "aggiungi al carrello", "添加到购物车", "カート�?�追加",
+    "aggiungi al carrello", "添加到购物车", "カートに追加",
 ]
 
 
@@ -135,7 +134,8 @@ def _extract_signals_from_el(page: Page, el) -> BoundingBoxSignal:
                     cls.includes(k) || id_.includes(k) || txt.includes(k)
                 );
 
-                const form_indicators = ["product-form", id_.includes("product-form"), tag === "form"];
+                // FIX #2: form_indicators truthy-string bug fixed
+                const form_indicators = [cls.includes("product-form"), id_.includes("product-form"), tag === "form"];
                 const has_form = form_indicators.some(i => i) ||
                                  ["product-form", "product-form__"].some(p => cls.includes(p));
 
@@ -152,7 +152,8 @@ def _extract_signals_from_el(page: Page, el) -> BoundingBoxSignal:
                     variant: has_variant,
                     form: has_form,
                     visible: visible,
-                    coherence: has_cta && has_price && has_variant
+                    // FIX #3: Structural coherence (CTA inside form), not cta&&price&&variant
+                    coherence: has_cta && has_form
                 };
             }
         """)
@@ -228,7 +229,7 @@ class EvidenceCollector:
                 return false;
             };
 
-            // 1. ALL forms — common across e-commerce
+            // FIX #1: Forms branch — repaired syntax, declared inputs, rendered gate
             const forms = Array.from(document.querySelectorAll('form'));
             forms.forEach(f => {
                 try {
@@ -236,16 +237,15 @@ class EvidenceCollector:
                     const cls = (f.className || '').toLowerCase();
                     const id_ = (f.id || '').toLowerCase();
                     const rect = f.getBoundingClientRect();
-                    c                    const is_purchase = /add to cart|buy now|checkout|cart/.test(txt) ||
-                                     /product-form/.test(cls) ||
-                                     /add-to-cart/.test(id_) ||
-                                     inputs.some(i => /(add to cart|buy now|checkout|cart)/i.test(i.value));
-onst visible = rect.width > 20 && rect.height > 50;
+                    const inputs = Array.from(f.querySelectorAll('input'));
+                    const rendered = rect.width > 20 && rect.height > 10;
                     const is_purchase = /add to cart|buy now|checkout|cart/.test(txt) ||
                                      /product-form/.test(cls) ||
                                      /add-to-cart/.test(id_) ||
-                                     inputs.some(i => /(add to cart|buy now|checkout|cart)/i.test(i.value))
                                      inputs.some(i => /(add to cart|buy now|checkout|cart)/i.test(i.value));
+                    if (rendered && is_purchase && !isHeaderOrDrawer(f)) {
+                        candidates.push({ id: f.id || '', class: f.className || '', type: 'form' });
+                    }
                 } catch(e) {}
             });
 
@@ -261,13 +261,13 @@ onst visible = rect.width > 20 && rect.height > 50;
                     const is_header = /header|nav|drawer/.test(cls) || /header|nav|drawer/.test(id_);
                     if (visible && !is_header) {
                         const patterns = [
-                            /product.*[box|wrapper]/i,
+                            /product.*(box|wrapper)/i,
                             /[-a-z]+-box$/i,
                             /[-a-z]+-selector/i,
-                            /buy.*[now|box]/i,
+                            /buy.*(now|box)/i,
                             /cart|basket/i,
-                            /price.*[box|card]/i,
-                            /variant.*[selector|picker]/i
+                            /price.*(box|card)/i,
+                            /variant.*(selector|picker)/i
                         ];
                         const matches = patterns.some(p => p.test(cls) || p.test(id_) || p.test(txt));
                         if (matches) {
@@ -347,8 +347,6 @@ onst visible = rect.width > 20 && rect.height > 50;
                     // Extract CTA text from multiple sources generically
                     const getElementText = (el) => {
                         let text = (el.textContent || el.innerText || "").toLowerCase().trim();
-                        
-                        // Descendant input[value]
                         const inputs = el.querySelectorAll('input');
                         inputs.forEach(input => {
                             const inputValue = (input.value || "").toLowerCase().trim();
@@ -356,8 +354,6 @@ onst visible = rect.width > 20 && rect.height > 50;
                                 text += " " + inputValue;
                             }
                         });
-                        
-                        // Descendant button text
                         const buttons = el.querySelectorAll('button');
                         buttons.forEach(btn => {
                             const btnText = (btn.textContent || btn.innerText || "").toLowerCase().trim();
@@ -365,19 +361,14 @@ onst visible = rect.width > 20 && rect.height > 50;
                                 text += " " + btnText;
                             }
                         });
-                        
-                        // aria-label
                         const ariaLabel = (el.getAttribute('aria-label') || "").toLowerCase().trim();
                         if (ariaLabel && ariaLabel.length > 2) {
                             text += " " + ariaLabel;
                         }
-                        
-                        // title attribute
                         const elTitle = (el.getAttribute('title') || "").toLowerCase().trim();
                         if (elTitle && elTitle.length > 2) {
                             text += " " + elTitle;
                         }
-                        
                         return text;
                     };
                     
@@ -394,7 +385,8 @@ onst visible = rect.width > 20 && rect.height > 50;
                     );
                     if (signals.variant) score += 0.10;
 
-                    const form_indicators = ["product-form", id_.includes("product-form"),	tag === "form"];
+                    // FIX #2: form_indicators truthy-string bug fixed
+                    const form_indicators = [cls.includes("product-form"), id_.includes("product-form"), tag === "form"];
                     signals.form = form_indicators.some(i => i) ||
                                    ["product-form", "product-form__"].some(p => cls.includes(p));
                     if (signals.form) score += 0.15;
@@ -406,7 +398,8 @@ onst visible = rect.width > 20 && rect.height > 50;
                         if (signals.visible) score += 0.10;
                     } catch(e) {}
 
-                    signals.coherence = signals.cta && signals.price && signals.variant;
+                    // FIX #3: Structural coherence (CTA inside form)
+                    signals.coherence = signals.cta && signals.form;
                     if (signals.coherence) score += 0.10;
 
                     const is_header = /header|nav|drawer/.test(id_) ||
@@ -507,8 +500,6 @@ onst visible = rect.width > 20 && rect.height > 50;
                 )
                 self.buy_box_confidence = best_score
 
-            # Compute expected social proof region if we have a buy box
-            # This uses a GENERIC structural model, not hardcoded offsets
             if best_bbox and best_signals.confidence >= BUY_BOX_CONFIDENCE_THRESHOLD:
                 try:
                     scroll_x = self.page.evaluate("window.scrollX || 0") or 0
@@ -548,11 +539,6 @@ onst visible = rect.width > 20 && rect.height > 50;
         """
         Scrolls viewport based on the primary opportunity type, suppresses popups,
         and captures viewport PNG screenshot bytes.
-
-        Per FINDING-SPECIFIC SCREENSHOT CAPTURE rules:
-        - MISSING_SOCIAL_PROOF: show product identity, buy box, expected social proof region
-        - MISSING_UPSELL: show product identity, buy box context, recommendation area (NOT footer)
-        - MISSING_STICKY_ATC: perform behavioral scrolling first
         """
         if getattr(self.page, "is_closed", lambda: False)():
             raise RuntimeError("Cannot capture screenshot on closed Page execution context")
@@ -566,14 +552,12 @@ onst visible = rect.width > 20 && rect.height > 50;
         self.buy_box_signals = None
         self.buy_box_reason = ""
 
-        # Initialize visual validation states
         self.product_identity_visible = True
         self.buy_box_visible = True
         self.relevant_social_proof_region_visible = True
         self.relevant_upsell_region_visible = True
         self.finding_visually_proven = False
 
-        # Extract primary opportunity type
         primary_opp_type = None
         if opportunities:
             first_opp = opportunities[0]
@@ -584,10 +568,8 @@ onst visible = rect.width > 20 && rect.height > 50;
                 if hasattr(primary_opp_type, "value"):
                     primary_opp_type = primary_opp_type.value
 
-        # Step 1: Capture bounding boxes FIRST (to determine if buy box was located)
         bmap = self.capture_bounding_boxes()
 
-        # Step 2: Scroll based on opportunity type (now knowing buy box status)
         self.buy_box_visible = bmap.buy_box is not None
         if not self.buy_box_visible:
             self.buy_box_visible = False
@@ -615,13 +597,8 @@ onst visible = rect.width > 20 && rect.height > 50;
                 except Exception:
                     pass
 
-        # Step 3: Wait for page readiness (layout stability)
         self._wait_for_page_readiness()
-
-        # Step 4: Capture screenshot
         png_bytes = self._capture_png_with_retry()
-
-        # Step 5: Independent visual validation from actual screenshot
         self._validate_from_screenshot(png_bytes, bmap, primary_opp_type)
 
         duration_ms = max(1, int((time.perf_counter() - start_time) * 1000))
@@ -629,12 +606,7 @@ onst visible = rect.width > 20 && rect.height > 50;
 
     def _scroll_for_social_proof(self, bmap: BoundingBoxMap, scroll_y: int) -> None:
         """Scroll viewport to include buy box AND expected social proof region."""
-        if bmap.buy_box is None:
-            self.buy_box_visible = False
-            self.buy_box_reason = "BUY_BOX_NOT_CONFIDENTLY_LOCATED"
-            self.page.evaluate("window.scrollTo(0, 0);")
-            return
-
+        # FIX #5: Do NOT early-return on bmap.buy_box is None — proceed with inline detection
         try:
             scroll_result = self.page.evaluate("""
                 () => {
@@ -652,10 +624,8 @@ onst visible = rect.width > 20 && rect.height > 50;
                         return false;
                     };
 
-                    // Generic buy box candidate scoring — NOT CSS selectors
                     const candidates = [];
 
-                    // 1. Forms with purchase semantics
                     const forms = Array.from(document.querySelectorAll('form'));
                     forms.forEach(f => {
                         const txt = (f.textContent || '').toLowerCase();
@@ -671,7 +641,6 @@ onst visible = rect.width > 20 && rect.height > 50;
                         }
                     });
 
-                    // 2. Sections around purchase CTA buttons
                     const cta_keywords = ["add to cart", "add to bag", "buy now", "select size", "checkout"];
                     const buttons = Array.from(document.querySelectorAll('button'));
                     buttons.forEach(b => {
@@ -692,7 +661,6 @@ onst visible = rect.width > 20 && rect.height > 50;
                         }
                     });
 
-                    // Score candidates
                     let bestEl = null;
                     let bestScore = 0;
 
@@ -704,11 +672,8 @@ onst visible = rect.width > 20 && rect.height > 50;
                             const tag = el.tagName.toLowerCase();
                             let score = 0;
 
-                            // Extract CTA text from multiple sources generically
                             const getElementText = (el) => {
                                 let text = (el.textContent || el.innerText || "").toLowerCase().trim();
-                                
-                                // Descendant input[value]
                                 const inputs = el.querySelectorAll('input');
                                 inputs.forEach(input => {
                                     const inputValue = (input.value || "").toLowerCase().trim();
@@ -716,8 +681,6 @@ onst visible = rect.width > 20 && rect.height > 50;
                                         text += " " + inputValue;
                                     }
                                 });
-                                
-                                // Descendant button text
                                 const buttons = el.querySelectorAll('button');
                                 buttons.forEach(btn => {
                                     const btnText = (btn.textContent || btn.innerText || "").toLowerCase().trim();
@@ -725,36 +688,33 @@ onst visible = rect.width > 20 && rect.height > 50;
                                         text += " " + btnText;
                                     }
                                 });
-                                
-                                // aria-label
                                 const ariaLabel = (el.getAttribute('aria-label') || "").toLowerCase().trim();
                                 if (ariaLabel && ariaLabel.length > 2) {
                                     text += " " + ariaLabel;
                                 }
-                                
-                                // title attribute
                                 const elTitle = (el.getAttribute('title') || "").toLowerCase().trim();
                                 if (elTitle && elTitle.length > 2) {
                                     text += " " + elTitle;
                                 }
-                                
                                 return text;
                             };
                             
                             const elementTxt = getElementText(el);
                             if (cta_keywords.some(k => elementTxt.includes(k))) score += 0.15;
-                            if (/\d+[\.,]?\d{1,2}/.test(txt)) score += 0.20;
-                            if (["variant", "selector", "size", "color", "product"].some(k => cls.includes(k) || id_.includes(k))) score += 0.10;
+                            if (/\\d+[\\.,]?\\d{1,2}/.test(txt)) score += 0.20;
+                            // FIX #4: Removed "product" from variant keywords
+                            if (["variant", "selector", "size", "color"].some(k => cls.includes(k) || id_.includes(k))) score += 0.10;
                             if (tag === 'form' || cls.includes('product-form') || id_.includes('product-form')) score += 0.15;
                             const r = el.getBoundingClientRect();
                             if (r.width > 10 && r.height > 10 && r.top >= -100 && r.bottom <= (window.innerHeight + 100)) score += 0.10;
-                            if (cta_keywords.some(k => txt.includes(k)) && /\d+[\.,]?\d{1,2}/.test(txt) &&
+                            if (cta_keywords.some(k => txt.includes(k)) && /\\d+[\\.,]?\\d{1,2}/.test(txt) &&
                                 ["variant", "selector", "size", "color"].some(k => cls.includes(k) || id_.includes(k))) score += 0.10;
                             if (r.left >= -10 && r.right <= (window.innerWidth + 10) && r.top >= -10 && r.bottom <= (window.innerHeight + 10)) score += 0.10;
                             if (isHeaderOrDrawer(el)) score -= 0.30;
 
                             score = Math.max(0.0, Math.min(1.0, score));
-                            if (score > bestScore && score >= 0.4) {
+                            // FIX #6: Separate scroll eligibility from 0.4 confidence threshold
+                            if (score > bestScore) {
                                 bestScore = score;
                                 bestEl = el;
                             }
@@ -766,7 +726,7 @@ onst visible = rect.width > 20 && rect.height > 50;
                         const viewHeight = window.innerHeight;
                         const scrollY = window.scrollY || window.pageYOffset;
                         const targetTop = rect.top;
-                        const targetBottom = rect.bottom + 120; // Expected social proof region below buy box
+                        const targetBottom = rect.bottom + 120;
                         const targetHeight = targetBottom - targetTop;
 
                         let targetY;
@@ -777,7 +737,12 @@ onst visible = rect.width > 20 && rect.height > 50;
                         }
 
                         window.scrollTo(0, Math.max(0, targetY));
-                        return { found: true, y: window.scrollY, confidence: bestScore };
+                        // FIX #7: Wait for smooth scroll stabilization before reading scrollY
+                        return new Promise(resolve => {
+                            setTimeout(() => {
+                                resolve({ found: true, y: window.scrollY || window.pageYOffset, confidence: bestScore });
+                            }, 150);
+                        });
                     }
                     return { found: false };
                 }
@@ -853,19 +818,14 @@ onst visible = rect.width > 20 && rect.height > 50;
             self.page.wait_for_load_state("domcontentloaded", timeout=2000)
         except Exception:
             pass
-
         try:
             self.page.wait_for_load_state("networkidle", timeout=1000)
         except Exception:
             pass
-
-        # Safety timeout for layout stability
         try:
             self.page.wait_for_timeout(500)
         except Exception:
             time.sleep(0.5)
-
-        # Disable web font blocking to prevent font lock stalls
         try:
             self.page.evaluate("""() => {
                 try {
@@ -883,7 +843,6 @@ onst visible = rect.width > 20 && rect.height > 50;
         max_attempts = 2
         png_bytes = None
         last_exc = None
-
         for attempt in range(1, max_attempts + 1):
             try:
                 if attempt > 1:
@@ -907,11 +866,9 @@ onst visible = rect.width > 20 && rect.height > 50;
                         self.page.wait_for_timeout(200)
                     except Exception:
                         pass
-
         if png_bytes is None:
             assert last_exc is not None
             raise last_exc
-
         return png_bytes
 
     def _validate_from_screenshot(
@@ -963,7 +920,6 @@ onst visible = rect.width > 20 && rect.height > 50;
                     let socialProofVisible = false;
                     let upsellVisible = false;
 
-                    // 1. Product identity (title) check
                     const h1s = Array.from(document.querySelectorAll("h1, .product-title, .product-name"));
                     for (const h of h1s) {
                         if (isInViewport(h) && (h.textContent || "").trim().length > 0) {
@@ -972,11 +928,9 @@ onst visible = rect.width > 20 && rect.height > 50;
                         }
                     }
 
-                    // 2. Buy box visibility — INDEPENDENT check
                     const cta_keywords = ["add to cart", "add to bag", "buy now", "select size", "checkout"];
                     let ctaEl = null;
 
-                    // Check for CTA buttons in viewport
                     const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], form button'));
                     for (const b of buttons) {
                         try {
@@ -993,7 +947,6 @@ onst visible = rect.width > 20 && rect.height > 50;
                     if (ctaEl) {
                         buyBoxVisible = true;
                     } else {
-                        // Fallback: check if any form with purchase semantics is in viewport
                         const forms = Array.from(document.querySelectorAll('form'));
                         for (const f of forms) {
                             if (!isHeaderOrDrawer(f) && isInViewport(f)) {
@@ -1006,9 +959,7 @@ onst visible = rect.width > 20 && rect.height > 50;
                         }
                     }
 
-                    // 3. Social proof visibility — INDEPENDENT of buy_box_visible
                     if (oppType === "MISSING_SOCIAL_PROOF") {
-                        // Check for actual review widgets
                         const reviewPatterns = [
                             '.reviews', '#reviews', '.review-widget', '.review-stars',
                             '.star-rating', '[itemtype*="Review"]', '[itemprop*="review"]',
@@ -1028,19 +979,14 @@ onst visible = rect.width > 20 && rect.height > 50;
                                 }
                             } catch(e) {}
                         }
-
-                        // If no actual review widget, check expected region
-                        // Expected region is structurally below buy box area
                         if (!socialProofVisible && ctaEl) {
                             const ctaRect = ctaEl.getBoundingClientRect();
-                            // Verify viewport extends below CTA (review area)
                             if (viewHeight - ctaRect.bottom > 60) {
                                 socialProofVisible = true;
                             }
                         }
                     }
 
-                    // 4. Upsell visibility — INDEPENDENT check
                     if (oppType === "MISSING_UPSELL") {
                         const upsellPatterns = ['recommendation', 'cross-sell', 'upsell', 'related-product', 'bundle'];
                         const divs = Array.from(document.querySelectorAll('div, section'));
@@ -1073,7 +1019,6 @@ onst visible = rect.width > 20 && rect.height > 50;
             self.relevant_social_proof_region_visible = val_result.get("social_proof_region_visible", False)
             self.relevant_upsell_region_visible = val_result.get("upsell_region_visible", False)
 
-            # Finding is visually proven only when ALL required regions are visible
             if opp_type == "MISSING_SOCIAL_PROOF":
                 self.finding_visually_proven = (
                     self.product_identity_visible and
