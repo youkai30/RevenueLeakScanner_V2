@@ -40,6 +40,21 @@ class EvidenceBuilder:
         self.storage = storage or SessionStorage()
         self.verifier = VisualVerifier()
 
+    @staticmethod
+    def _primary_opportunity_type(pdp_result: PDPScanResult) -> str | None:
+        """P1.5: Extract the primary opportunity type for opportunity-aware validation."""
+        opportunities = getattr(pdp_result, "opportunities", []) or []
+        if not opportunities:
+            return None
+        opp = opportunities[0]
+        if hasattr(opp, "opportunity_type"):
+            ot = opp.opportunity_type
+            return getattr(ot, "value", ot)
+        if isinstance(opp, dict) and "opportunity_type" in opp:
+            ot = opp.get("opportunity_type")
+            return getattr(ot, "value", ot)
+        return None
+
     def build_finding(
         self,
         pdp_result: PDPScanResult,
@@ -65,35 +80,83 @@ class EvidenceBuilder:
         parsed_url = urlparse(pdp_result.product_url)
         relative_path = f"{parsed_url.netloc}/{session_str}/{png_filename}"
 
+        # ─────────────────────────────────────────────────────────────
+        # P1.5 — REAL capture metadata (populated by core_scanner from
+        # the EvidenceCollector). Clamped, never fabricated.
+        # ─────────────────────────────────────────────────────────────
+        real_duration_ms = int(getattr(pdp_result, "capture_duration_ms", 0) or 0)
+        capture_duration_ms = max(1, real_duration_ms)
+        real_browser_version = str(getattr(pdp_result, "browser_version", "") or "")
+        browser_version = real_browser_version or browser_version
+        scroll_y = int(getattr(pdp_result, "scroll_y", 0) or 0)
+
+        # ─────────────────────────────────────────────────────────────
+        # P1.5 — Visibility flags (model defaults are True; core_scanner
+        # sets them False when capture fails or validation disproves them).
+        # ─────────────────────────────────────────────────────────────
+        has_unresolved_modal = bool(getattr(pdp_result, "has_unresolved_modal", False))
+        product_identity_visible = bool(getattr(pdp_result, "product_identity_visible", True))
+        buy_box_visible = bool(getattr(pdp_result, "buy_box_visible", True))
+        relevant_social_proof_region_visible = bool(getattr(pdp_result, "relevant_social_proof_region_visible", True))
+        relevant_upsell_region_visible = bool(getattr(pdp_result, "relevant_upsell_region_visible", True))
+
+        # ─────────────────────────────────────────────────────────────
+        # P1.5 — Opportunity-aware valid formula: require ONLY the flags
+        # relevant to the primary opportunity type.
+        # ─────────────────────────────────────────────────────────────
+        primary_opp = self._primary_opportunity_type(pdp_result)
+
+        require_social = primary_opp in ("MISSING_SOCIAL_PROOF", "REVENUE_LEAK") or primary_opp is None
+        require_upsell = primary_opp in ("MISSING_UPSELL",) or primary_opp is None
+
+        valid_visual = (
+            not has_unresolved_modal
+            and product_identity_visible
+            and buy_box_visible
+            and (not require_social or relevant_social_proof_region_visible)
+            and (not require_upsell or relevant_upsell_region_visible)
+        )
+
+        failures: list[str] = []
+        if has_unresolved_modal:
+            failures.append("Unresolved modal overlay blocking the page view")
+        if not product_identity_visible:
+            failures.append("Product identity not visible in screenshot")
+        if not buy_box_visible:
+            failures.append("Product buy box not visible in screenshot")
+        if require_social and not relevant_social_proof_region_visible:
+            failures.append("Relevant social proof region not visible in screenshot")
+        if require_upsell and not relevant_upsell_region_visible:
+            failures.append("Relevant upsell region not visible in screenshot")
+        validation_reason = failures[0] if failures else reason
+
+        # ─────────────────────────────────────────────────────────────
+        # P1.5 — Independent visual-proof flags (fail-closed defaults).
+        # ─────────────────────────────────────────────────────────────
+        finding_visually_proven = bool(getattr(pdp_result, "finding_visually_proven", False))
+        product_identity_visually_proven = bool(getattr(pdp_result, "product_identity_visually_proven", False))
+        buy_box_visually_proven = bool(getattr(pdp_result, "buy_box_visually_proven", False))
+        social_proof_region_visually_proven = bool(getattr(pdp_result, "social_proof_region_visually_proven", False))
+        upsell_region_visually_proven = bool(getattr(pdp_result, "upsell_region_visually_proven", False))
+        sticky_atc_region_visually_proven = bool(getattr(pdp_result, "sticky_atc_region_visually_proven", False))
+
         visual_evidence = VisualEvidence(
             image_file=png_filename,
             relative_path=relative_path,
             width=width,
             height=height,
             sha256_hash=sha256_hash,
-            capture_duration_ms=450,
+            capture_duration_ms=capture_duration_ms,
             browser_version=browser_version,
             viewport=viewport,
-            valid=(
-                not getattr(pdp_result, "has_unresolved_modal", False)
-                and getattr(pdp_result, "product_identity_visible", True)
-                and getattr(pdp_result, "buy_box_visible", True)
-                and getattr(pdp_result, "relevant_social_proof_region_visible", True)
-                and getattr(pdp_result, "relevant_upsell_region_visible", True)
-            ),
-            validation_reason=(
-                "Unresolved modal overlay blocking the page view" if getattr(pdp_result, "has_unresolved_modal", False)
-                else "Product identity not visible in screenshot" if not getattr(pdp_result, "product_identity_visible", True)
-                else "Product buy box not visible in screenshot" if not getattr(pdp_result, "buy_box_visible", True)
-                else "Relevant social proof region not visible in screenshot" if not getattr(pdp_result, "relevant_social_proof_region_visible", True)
-                else "Relevant upsell region not visible in screenshot" if not getattr(pdp_result, "relevant_upsell_region_visible", True)
-                else reason
-            ),
-            scroll_y=getattr(pdp_result, "scroll_y", 0),
+            valid=valid_visual,
+            validation_reason=validation_reason,
+            scroll_y=scroll_y,
             store_domain=parsed_url.netloc,
             pdp_url=pdp_result.product_url,
             finding_id=str(finding_uuid),
             evidence_id=str(evidence_uuid),
+            finding_visually_proven=finding_visually_proven,
         )
 
         finding = Finding(
@@ -117,11 +180,14 @@ class EvidenceBuilder:
             review_detection_state=getattr(pdp_result, "review_detection_state", "UNKNOWN"),
             upsell_detection_state=getattr(pdp_result, "upsell_detection_state", "UNKNOWN"),
             sticky_atc_detection_state=getattr(pdp_result, "sticky_atc_detection_state", "UNKNOWN"),
+            product_identity_visually_proven=product_identity_visually_proven,
+            buy_box_visually_proven=buy_box_visually_proven,
+            social_proof_region_visually_proven=social_proof_region_visually_proven,
+            upsell_region_visually_proven=upsell_region_visually_proven,
+            sticky_atc_region_visually_proven=sticky_atc_region_visually_proven,
         )
 
         return finding, sha256_hash, width, height, relative_path
-
-
 
     def compile_and_save_session(
         self,
@@ -136,7 +202,7 @@ class EvidenceBuilder:
         """
         Compiles transient scan context + commercial impact + per-finding verified evidence into an immutable SessionBundle,
         seals with SHA-256 checksum, and persists via Write-Once SessionStorage.
-        
+
         pdp_evidence_items is a list of (pdp_result, png_bytes, bounding_boxes) tuples, ensuring EACH Finding
         anchors its own verified screenshot PNG and spatial bounding boxes.
         """
@@ -163,20 +229,11 @@ class EvidenceBuilder:
                 findings_list.append(finding_obj)
                 all_pngs[finding_obj.evidence.image_file] = png_bytes
         elif transient_context.pdp_results:
-            # Legacy fallback if no pdp_evidence_items provided
-            for pdp in transient_context.pdp_results:
-                dummy_bytes = b"FALLBACK"
-                if primary_png_bytes is None:
-                    primary_png_bytes = dummy_bytes
-                finding_obj, _, _, _, _ = self.build_finding(
-                    pdp_result=pdp,
-                    png_bytes=dummy_bytes,
-                    bounding_boxes=BoundingBoxMap(),
-                    session_id=current_session_id,
-                    viewport=viewport,
-                )
-                findings_list.append(finding_obj)
-                all_pngs[finding_obj.evidence.image_file] = dummy_bytes
+            # P1.5 — Legacy fallback REMOVED: fabricating dummy PNG evidence is
+            # forbidden. A session without real verified screenshots must fail.
+            raise InvalidBundleException(
+                "No verified PNG evidence provided; legacy fallback path removed to prevent fabricated evidence."
+            )
 
         if not primary_png_bytes:
             raise InvalidBundleException("At least one valid evidence PNG stream is required for session bundle compilation.")
