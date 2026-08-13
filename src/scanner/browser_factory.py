@@ -1,12 +1,10 @@
 """
 src/scanner/browser_factory.py — Process-Isolated Playwright Browser Lifecycle Manager
-
 Layer 2: Browser Engine
 """
 import logging
 from typing import Any
 from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
-
 from src.config import MIN_VIEWPORT_HEIGHT, MIN_VIEWPORT_WIDTH
 
 logger = logging.getLogger(__name__)
@@ -39,7 +37,6 @@ class BrowserFactory:
                 ],
             )
 
-
     def _enforce_context_limit(self) -> None:
         """Enforces limits on concurrent BrowserContext objects to prevent resource leaks."""
         MAX_CONCURRENT_CONTEXTS = 3
@@ -68,7 +65,6 @@ class BrowserFactory:
             or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 RevenueLeakScanner/2.3.1"
         )
-
         assert self._browser is not None
         context = self._browser.new_context(
             viewport={"width": viewport_width, "height": viewport_height},
@@ -97,7 +93,6 @@ class BrowserFactory:
             or "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 "
             "(KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1 RevenueLeakScannerMobile/2.3.1"
         )
-
         assert self._browser is not None
         context = self._browser.new_context(
             viewport={"width": viewport_width, "height": viewport_height},
@@ -109,7 +104,6 @@ class BrowserFactory:
         self._active_contexts.append(context)
         return context
 
-
     def create_clean_page(
         self,
         viewport_width: int = MIN_VIEWPORT_WIDTH,
@@ -119,6 +113,11 @@ class BrowserFactory:
         context = self.create_clean_context(viewport_width, viewport_height)
         page = context.new_page()
         page.set_default_timeout(15000)  # 15s default navigation/action timeout
+
+        # P3 — Apply stealth anti-detection
+        from src.scanner.navigation_helper import apply_stealth_if_available
+        apply_stealth_if_available(page)
+
         return page
 
     def close(self) -> None:
@@ -129,14 +128,12 @@ class BrowserFactory:
             except Exception:
                 pass
         self._active_contexts.clear()
-
         if self._browser:
             try:
                 self._browser.close()
             except Exception:
                 pass
             self._browser = None
-
         if self._playwright:
             try:
                 self._playwright.stop()
