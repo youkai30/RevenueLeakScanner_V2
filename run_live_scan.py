@@ -7,7 +7,6 @@ import logging
 import json
 import time
 from pathlib import Path
-
 from src.ingestion.store_loader import StoreLoader
 from src.orchestration.worker import execute_single_store_worker
 
@@ -18,6 +17,24 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _safe_float(value, default: float = 0.0) -> float:
+    """Safely convert a value to float, returning default if None or invalid."""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_str(value, default: str = "N/A") -> str:
+    """Safely convert a value to string, returning default if None or empty."""
+    if value is None:
+        return default
+    s = str(value).strip()
+    return s if s else default
+
+
 def scan_single_store_task(item):
     idx, total, store = item
     print(f"\n---> [{idx}/{total}] STARTING Domain: {store.domain} ({store.base_url})")
@@ -25,18 +42,34 @@ def scan_single_store_task(item):
     try:
         res_dict = execute_single_store_worker(store.model_dump(mode="json"))
         elapsed = time.perf_counter() - start_t
+
+        # SAFE EXTRACTION — handles None values from failed scans
+        status = _safe_str(res_dict.get("status"), "UNKNOWN")
+        session_id = _safe_str(res_dict.get("session_id"), "N/A")
+        session_json_path = _safe_str(res_dict.get("session_json_path"), "N/A")
+
+        # Financial fields — may be None for failed/blocked scans
+        est_loss = _safe_float(res_dict.get("est_monthly_loss_usd"), 0.0)
+        lead_priority = _safe_str(res_dict.get("lead_priority"), "N/A")
+
         print(
             f"\n---> [{idx}/{total}] COMPLETED Domain: {store.domain} in {elapsed:.1f}s\n"
-            f"     Status: {res_dict.get('status')}\n"
-            f"     Session ID: {res_dict.get('session_id')}\n"
-            f"     Estimated Monthly Loss: ${res_dict.get('est_monthly_loss_usd', 0):,.2f}\n"
-            f"     Lead Priority: {res_dict.get('lead_priority')}\n"
-            f"     Session JSON: {res_dict.get('session_json_path')}"
+            f"     Status: {status}\n"
+            f"     Session ID: {session_id}\n"
+            f"     Estimated Monthly Loss: ${est_loss:,.2f}\n"
+            f"     Lead Priority: {lead_priority}\n"
+            f"     Session JSON: {session_json_path}"
         )
         return res_dict
     except Exception as exc:
         logger.error("Failed scanning store %s: %s", store.domain, exc)
-        return {"domain": store.domain, "status": "FAILED", "error_message": str(exc)}
+        return {
+            "domain": store.domain,
+            "status": "FAILED",
+            "error_message": str(exc),
+            "est_monthly_loss_usd": 0.0,
+            "lead_priority": "N/A",
+        }
 
 
 def main():
