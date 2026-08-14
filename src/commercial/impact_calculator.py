@@ -3,17 +3,11 @@ src/commercial/impact_calculator.py — Multi-Opportunity Commercial Impact Calc
 
 Layer 3: Commercial Intelligence Engine
 
-P4: Evaluates ALL commercial opportunities (not just OOS):
-    - REVENUE_LEAK: traffic × oos_ratio × CR × AOV
-    - MISSING_SOCIAL_PROOF: traffic × uplift_7% × CR × AOV × coverage_0.3
-    - MISSING_UPSELL: traffic × uplift_15% × AOV × margin_0.3 × coverage_0.4
-    - MISSING_STICKY_ATC: mobile_traffic × uplift_10% × CR × AOV
-
-DOES NOT:
-  - Use Playwright / DOM selectors
-  - Call external APIs or HTTP services
-  - Write SessionBundle or call SessionStorage
-  - Render PDFs, Teasers, or HTML
+P4 Final:
+  - REVENUE_LEAK: traffic × oos_ratio × CR × AOV (calculated directly, backward compatible)
+  - MISSING_SOCIAL_PROOF: + 7% uplift × CR × AOV × 0.3
+  - MISSING_UPSELL: + 15% uplift × AOV × 30% margin × 0.4
+  - MISSING_STICKY_ATC: + mobile_traffic × 10% uplift × CR × AOV
 """
 import logging
 from typing import Any
@@ -37,33 +31,31 @@ logger = logging.getLogger(__name__)
 OPPORTUNITY_UPLIFTS = {
     "REVENUE_LEAK": {
         "base_formula": "traffic × oos_ratio × CR × AOV",
-        "uplift_pct": None,  # Uses actual OOS ratio
+        "uplift_pct": None,
         "coverage": 1.0,
     },
     "MISSING_SOCIAL_PROOF": {
         "base_formula": "traffic × uplift × CR × AOV × coverage",
-        "uplift_pct": 0.07,   # 7% conversion uplift (CXL Institute)
-        "coverage": 0.30,     # 30% of visitors see buy box
+        "uplift_pct": 0.07,
+        "coverage": 0.30,
     },
     "MISSING_UPSELL": {
         "base_formula": "traffic × uplift × AOV × margin × coverage",
-        "uplift_pct": 0.15,   # 15% AOV uplift (McKinsey)
-        "coverage": 0.40,     # 40% of buyers see upsell
-        "margin_factor": 0.30, # 30% gross margin
+        "uplift_pct": 0.15,
+        "coverage": 0.40,
+        "margin_factor": 0.30,
     },
     "MISSING_STICKY_ATC": {
         "base_formula": "mobile_traffic × uplift × CR × AOV",
-        "uplift_pct": 0.10,   # 10% conversion uplift (Baymard)
+        "uplift_pct": 0.10,
         "coverage": 1.0,
-        "mobile_share": 0.55, # 55% mobile traffic (Statista 2024)
+        "mobile_share": 0.55,
     },
 }
 
 
 class CommercialImpactCalculator:
-    """
-    Pure, deterministic financial loss calculator supporting multiple opportunity types.
-    """
+    """Pure, deterministic financial loss calculator supporting multiple opportunity types."""
 
     def __init__(
         self,
@@ -96,10 +88,7 @@ class CommercialImpactCalculator:
         measured_traffic: int | None = None,
         traffic_source_name: str | None = None,
     ) -> CommercialCalculationResult:
-        """
-        Computes commercial financial impact across ALL opportunity types.
-        Returns total loss = REVENUE_LEAK + SOCIAL_PROOF + UPSELL + STICKY_ATC.
-        """
+        """Computes commercial financial impact across ALL opportunity types."""
         provenance: list[CommercialParameterProvenance] = []
         confidence_score = 1.0
         has_fallback = False
@@ -194,17 +183,19 @@ class CommercialImpactCalculator:
             confidence_score -= 0.05
 
         # ─────────────────────────────────────────────────────────────
-        # 5. P4: Multi-Opportunity Financial Loss Calculation
+        # 5. P4 Final: Multi-Opportunity Financial Loss Calculation
         # ─────────────────────────────────────────────────────────────
         opp_counts = self._count_opportunities(scan_context)
         total_loss = 0.0
         breakdown: dict[str, float] = {}
 
-        # REVENUE_LEAK: traffic × oos_ratio × CR × AOV
-        if opp_counts["REVENUE_LEAK"] > 0:
-            leak = traffic * oos_ratio * baseline_cr * aov
-            total_loss += leak
-            breakdown["REVENUE_LEAK"] = round(leak, 2)
+        # REVENUE_LEAK: calculated DIRECTLY from oos_ratio (backward compatible)
+        # This ensures legacy tests that set out_of_stock=True (but don't populate
+        # opportunities list) still get correct loss calculation.
+        revenue_leak = traffic * oos_ratio * baseline_cr * aov
+        if revenue_leak > 0:
+            total_loss += revenue_leak
+            breakdown["REVENUE_LEAK"] = round(revenue_leak, 2)
 
         # MISSING_SOCIAL_PROOF: traffic × 7% uplift × CR × AOV × 0.3
         if opp_counts["MISSING_SOCIAL_PROOF"] > 0:
@@ -234,14 +225,14 @@ class CommercialImpactCalculator:
 
         est_monthly_loss_usd = round(total_loss, 2)
 
-        # P4: Add breakdown to provenance (auditability)
+        # Add breakdown to provenance (auditability)
         for opp_type, value in breakdown.items():
             if value > 0:
                 provenance.append(CommercialParameterProvenance(
                     parameter_name=f"loss_from_{opp_type}",
                     value=value,
                     source=ParameterSource.PRIMARY_MEASURED if opp_type == "REVENUE_LEAK" else ParameterSource.FALLBACK_ASSUMED,
-                    source_detail=f"{OPPORTUNITY_UPLIFTS[opp_type]['base_formula']} ({opp_counts[opp_type]} occurrences)",
+                    source_detail=OPPORTUNITY_UPLIFTS[opp_type]["base_formula"],
                     confidence_impact=0.0 if opp_type == "REVENUE_LEAK" else -0.02,
                 ))
 
@@ -250,7 +241,7 @@ class CommercialImpactCalculator:
             confidence_score = 0.69
         confidence_score = max(0.0, min(1.0, round(confidence_score, 2)))
 
-        # 6. Lead Priority (based on TOTAL loss across all opportunities)
+        # Lead Priority
         if est_monthly_loss_usd >= 10000.0:
             lead_priority = "HIGH"
         elif est_monthly_loss_usd >= 2500.0:
@@ -258,18 +249,25 @@ class CommercialImpactCalculator:
         else:
             lead_priority = "LOW"
 
-        # 7. Footnote Disclosure
+        # Footnote Disclosure — backward compatible with legacy test assertions
         active_opps = [k for k, v in breakdown.items() if v > 0]
+        non_revenue_opps = [k for k in active_opps if k != "REVENUE_LEAK"]
+
         if has_fallback:
             footnote = (
-                f"* Revenue loss includes {len(active_opps)} opportunity type(s): {', '.join(active_opps)}. "
-                f"Confidence: {confidence_score * 100:.0f}%. Traffic: {traffic:,}/mo; AOV: ${aov:.2f}."
+                f"* Note: Revenue loss estimation includes benchmark parameters "
+                f"(Confidence Rating: {confidence_score * 100:.0f}%). "
+                f"Traffic estimated at {traffic:,} visits/mo; AOV estimated at ${aov:.2f}."
             )
+            if non_revenue_opps:
+                footnote += f" Also includes CRO uplift from: {', '.join(non_revenue_opps)}."
         else:
             footnote = (
-                f"* Based on measured OOS ({oos_frequency_pct:.1f}%) and {len(active_opps)} opportunity type(s): "
-                f"{', '.join(active_opps)}. Traffic: {traffic:,}/mo."
+                f"* Estimated based on measured PDP out-of-stock ratio ({oos_frequency_pct:.1f}%) "
+                f"and measured monthly traffic ({traffic:,} visits/mo)."
             )
+            if non_revenue_opps:
+                footnote += f" Plus CRO uplift from: {', '.join(non_revenue_opps)}."
 
         if total_inspected == 0:
             financial_loss_status = "UNKNOWN"
